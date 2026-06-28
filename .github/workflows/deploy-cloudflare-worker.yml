@@ -1,0 +1,51 @@
+name: Deploy Cloudflare Worker
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "cloudflare-worker/**"
+      - ".github/workflows/deploy-cloudflare-worker.yml"
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cloudflare-worker
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare Wrangler config
+        env:
+          CLOUDFLARE_D1_DATABASE_ID: ${{ secrets.CLOUDFLARE_D1_DATABASE_ID }}
+        run: |
+          if [ -f wrangler.toml ]; then
+            echo "Using committed wrangler.toml"
+          elif [ -n "${CLOUDFLARE_D1_DATABASE_ID:-}" ]; then
+            cp wrangler.toml.example wrangler.toml
+            sed -i "s/replace-with-your-d1-database-id/${CLOUDFLARE_D1_DATABASE_ID}/g" wrangler.toml
+          else
+            echo "::error::Missing cloudflare-worker/wrangler.toml or GitHub secret CLOUDFLARE_D1_DATABASE_ID"
+            exit 1
+          fi
+
+      - name: Apply D1 schema
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: cloudflare-worker
+          command: d1 execute motiontrace --remote --file=./schema.sql
+
+      - name: Deploy Worker
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: cloudflare-worker
+          command: deploy

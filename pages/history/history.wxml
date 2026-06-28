@@ -1,0 +1,45 @@
+<view class="page history-page">
+  <view class="history-head">
+    <view>
+      <view class="eyebrow">按天归档</view>
+      <view class="title">轨迹历史</view>
+    </view>
+    <view class="count-pill">{{days.length}} 天</view>
+  </view>
+
+  <view wx:if="{{days.length}}" class="day-list">
+    <view
+      wx:for="{{days}}"
+      wx:key="date"
+      class="day-card"
+      data-date="{{item.date}}"
+      bindtap="openDay"
+    >
+      <view class="day-main">
+        <view>
+          <view class="day-date">{{item.date}}</view>
+          <view class="day-week">{{item.week}} · {{item.points}} 个轨迹点</view>
+        </view>
+        <view class="arrow">›</view>
+      </view>
+      <view class="summary-row">
+        <view>
+          <text class="summary-value">{{item.distance}}</text>
+          <text class="summary-label">距离</text>
+        </view>
+        <view>
+          <text class="summary-value">{{item.duration}}</text>
+          <text class="summary-label">时长</text>
+        </view>
+        <view>
+          <text class="summary-value">{{item.checkins}}</text>
+          <text class="summary-label">打卡</text>
+        </view>
+      </view>
+    </view>
+  </view>
+
+  <view wx:else class="empty history-empty">
+    还没有保存过轨迹。回到今日页打开记录开关，第一条路线就会出现在这里。
+  </view>
+</view>

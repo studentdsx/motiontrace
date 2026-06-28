@@ -1,0 +1,56 @@
+.settings-page {
+  padding: 28rpx 24rpx 190rpx;
+  box-sizing: border-box;
+}
+
+.settings-head {
+  margin-bottom: 24rpx;
+}
+
+.eyebrow {
+  color: #728071;
+  font-size: 24rpx;
+}
+
+.title {
+  margin-top: 6rpx;
+  color: #18231f;
+  font-size: 44rpx;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.panel {
+  margin-bottom: 18rpx;
+  padding: 26rpx;
+  background: #fffdf8;
+  border: 1rpx solid #ebe3d5;
+  border-radius: 8rpx;
+}
+
+.panel-title {
+  color: #1f2b26;
+  font-size: 30rpx;
+  font-weight: 700;
+}
+
+.panel-text {
+  margin-top: 12rpx;
+  color: #657066;
+  font-size: 26rpx;
+  line-height: 1.6;
+}
+
+.danger-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 88rpx;
+  margin-top: 30rpx;
+  color: #fffdf8;
+  font-size: 30rpx;
+  font-weight: 700;
+  background: #b94f44;
+  border-radius: 8rpx;
+}

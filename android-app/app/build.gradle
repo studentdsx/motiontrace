@@ -1,0 +1,32 @@
+apply plugin: "com.android.application"
+
+def amapKey = providers.gradleProperty("AMAP_KEY").orElse("").get()
+
+android {
+    namespace "com.motiontrace.diary"
+    compileSdk 36
+    buildToolsVersion "36.1.0"
+
+    defaultConfig {
+        applicationId "com.motiontrace.diary"
+        minSdk 23
+        targetSdk 35
+        versionCode 1
+        versionName "1.0.0"
+        manifestPlaceholders = [AMAP_KEY: amapKey]
+        buildConfigField "String", "AMAP_KEY", "\"${amapKey}\""
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation "com.amap.api:3dmap-location-search:11.2.000_loc11.2.000_sea9.8.0"
+}

@@ -1,0 +1,22 @@
+<view class="page settings-page">
+  <view class="settings-head">
+    <view class="eyebrow">隐私与数据</view>
+    <view class="title">设置</view>
+  </view>
+
+  <view class="panel">
+    <view class="panel-title">定位使用</view>
+    <view class="panel-text">
+      当前版本只在小程序前台开启轨迹记录时使用定位，用于绘制路线、计算距离和保存打卡位置。
+    </view>
+  </view>
+
+  <view class="panel">
+    <view class="panel-title">数据保存</view>
+    <view class="panel-text">
+      轨迹、备注和照片路径默认保存在本机缓存中。卸载小程序、清理缓存或更换设备后，本地数据可能无法恢复。
+    </view>
+  </view>
+
+  <button class="danger-btn" bindtap="clearData">清空本地轨迹数据</button>
+</view>
