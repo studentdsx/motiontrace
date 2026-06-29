@@ -13,6 +13,7 @@ import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
 import android.os.Build;
 import android.os.IBinder;
+import android.util.Log;
 
 import com.amap.api.location.AMapLocation;
 import com.amap.api.location.AMapLocationClient;
@@ -21,6 +22,7 @@ import com.amap.api.location.AMapLocationListener;
 import com.amap.api.maps.MapsInitializer;
 
 public final class TrackRecordingService extends Service implements AMapLocationListener {
+    private static final String TAG = "MotionTraceService";
     static final String ACTION_START = "com.motiontrace.diary.action.START";
     static final String ACTION_STOP = "com.motiontrace.diary.action.STOP";
     static final String ACTION_TRACK_UPDATED = "com.motiontrace.diary.action.TRACK_UPDATED";
@@ -36,22 +38,27 @@ public final class TrackRecordingService extends Service implements AMapLocation
     private static final float ACTIVE_SPEED_MPS = 3.0f;
     private static final float FAST_SPEED_MPS = 8.0f;
     private static final float SLOW_SPEED_MPS = 0.8f;
+    private static final String AMAP_KEY = BuildConfig.AMAP_KEY;
 
     private AMapLocationClient locationClient;
     private boolean updatesStarted;
     private long currentIntervalMs = SLOW_INTERVAL_MS;
+    private static volatile boolean serviceAlive;
 
     static boolean isRecording(Context context) {
-        return context.getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(KEY_RECORDING, false);
+        return serviceAlive && context.getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(KEY_RECORDING, false);
     }
 
     @Override
     public void onCreate() {
         super.onCreate();
+        serviceAlive = true;
         MapsInitializer.updatePrivacyShow(this, true, true);
         MapsInitializer.updatePrivacyAgree(this, true);
+        MapsInitializer.setApiKey(AMAP_KEY);
         AMapLocationClient.updatePrivacyShow(this, true, true);
         AMapLocationClient.updatePrivacyAgree(this, true);
+        AMapLocationClient.setApiKey(AMAP_KEY);
         createNotificationChannel();
     }
 
@@ -64,13 +71,22 @@ public final class TrackRecordingService extends Service implements AMapLocation
         }
 
         startTracking();
-        return START_STICKY;
+        return START_NOT_STICKY;
     }
 
     @Override
     public void onDestroy() {
         removeUpdates();
+        TrackStore.finishActiveTrip(this);
+        setRecording(false);
+        serviceAlive = false;
         super.onDestroy();
+    }
+
+    @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        stopTracking();
+        super.onTaskRemoved(rootIntent);
     }
 
     @Override
@@ -80,6 +96,12 @@ public final class TrackRecordingService extends Service implements AMapLocation
 
     @Override
     public void onLocationChanged(AMapLocation location) {
+        if (location == null || location.getErrorCode() != 0) {
+            logLocationFailure(location);
+            adjustLocationInterval(location);
+            updateNotification();
+            return;
+        }
         TrackStore.appendPoint(this, location);
         adjustLocationInterval(location);
         updateNotification();
@@ -125,14 +147,23 @@ public final class TrackRecordingService extends Service implements AMapLocation
             }
             AMapLocationClientOption option = new AMapLocationClientOption();
             option.setLocationMode(AMapLocationClientOption.AMapLocationMode.Hight_Accuracy);
+            option.setGpsFirst(true);
             option.setInterval(currentIntervalMs);
             option.setNeedAddress(false);
             option.setOnceLocation(false);
             option.setLocationCacheEnable(true);
             locationClient.setLocationOption(option);
             locationClient.startLocation();
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            Log.w(TAG, "track location startup failed", e);
         }
+    }
+
+    private void logLocationFailure(AMapLocation location) {
+        int code = location == null ? -1 : location.getErrorCode();
+        String info = location == null ? "no location result" : String.valueOf(location.getErrorInfo());
+        String detail = location == null ? "" : String.valueOf(location.getLocationDetail());
+        Log.w(TAG, "track location failed: code=" + code + ", info=" + info + ", detail=" + detail);
     }
 
     private void adjustLocationInterval(AMapLocation location) {
@@ -143,6 +174,7 @@ public final class TrackRecordingService extends Service implements AMapLocation
         currentIntervalMs = nextInterval;
         AMapLocationClientOption option = new AMapLocationClientOption();
         option.setLocationMode(AMapLocationClientOption.AMapLocationMode.Hight_Accuracy);
+        option.setGpsFirst(true);
         option.setInterval(currentIntervalMs);
         option.setNeedAddress(false);
         option.setOnceLocation(false);

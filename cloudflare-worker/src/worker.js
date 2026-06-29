@@ -2,6 +2,8 @@ const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 30;
 const MAX_PAYLOAD_BYTES = 900 * 1024;
 const PASSWORD_MIN_LENGTH = 8;
 const PASSWORD_PBKDF2_ITERATIONS = 120000;
+const DEFAULT_ADMIN_USERNAME = "admin";
+const DEFAULT_ADMIN_PASSWORD = "Admin@1357";
 
 export default {
   async fetch(request, env) {
@@ -220,17 +222,33 @@ async function listSubmissions(request, env) {
 }
 
 function requireAdmin(request, env) {
-  const expected = String(env.ADMIN_TOKEN || "").trim();
-  if (!expected) {
-    return json({ error: "admin_not_configured" }, 503);
-  }
-  const header = request.headers.get("Authorization") || "";
-  const match = header.match(/^Bearer\s+(.+)$/i);
-  const token = match ? match[1].trim() : "";
-  if (!token || token !== expected) {
+  const credentials = parseAdminCredentials(request.headers.get("Authorization") || "");
+  const expectedUsername = String(env.ADMIN_USERNAME || DEFAULT_ADMIN_USERNAME);
+  const expectedPassword = String(env.ADMIN_PASSWORD || DEFAULT_ADMIN_PASSWORD);
+  if (!credentials || credentials.username !== expectedUsername || credentials.password !== expectedPassword) {
     return json({ error: "unauthorized" }, 401);
   }
   return null;
+}
+
+function parseAdminCredentials(header) {
+  const match = header.match(/^Basic\s+(.+)$/i);
+  if (!match) {
+    return null;
+  }
+  try {
+    const decoded = atob(match[1]);
+    const separator = decoded.indexOf(":");
+    if (separator < 0) {
+      return null;
+    }
+    return {
+      username: decoded.slice(0, separator),
+      password: decoded.slice(separator + 1)
+    };
+  } catch (error) {
+    return null;
+  }
 }
 
 async function createSession(env, userId) {
@@ -435,7 +453,7 @@ function adminPage() {
     .status.err { color: var(--red); border-color: #edc8c2; background: #fff6f4; }
     .toolbar {
       display: grid;
-      grid-template-columns: minmax(220px, 1.2fr) minmax(160px, 0.8fr) 110px auto auto;
+      grid-template-columns: minmax(130px, 0.7fr) minmax(170px, 0.8fr) minmax(220px, 1.2fr) minmax(110px, 0.5fr) auto auto;
       gap: 10px;
       align-items: center;
       padding: 12px;
@@ -550,7 +568,8 @@ function adminPage() {
     </header>
 
     <section class="toolbar" aria-label="查询条件">
-      <input id="token" type="password" autocomplete="off" placeholder="管理员 Token">
+      <input id="username" type="text" autocomplete="username" placeholder="管理员账号">
+      <input id="password" type="password" autocomplete="current-password" placeholder="管理员密码">
       <input id="email" type="search" placeholder="按邮箱过滤">
       <select id="limit" aria-label="加载条数">
         <option value="50">50 条</option>
@@ -583,30 +602,35 @@ function adminPage() {
           </tr>
         </thead>
         <tbody id="rows">
-          <tr><td colspan="8" class="empty">输入管理员 Token 后查询</td></tr>
+          <tr><td colspan="8" class="empty">输入管理员账号密码后查询</td></tr>
         </tbody>
       </table>
     </section>
   </main>
 
   <script>
-    var token = document.getElementById("token");
+    var username = document.getElementById("username");
+    var password = document.getElementById("password");
     var email = document.getElementById("email");
     var limit = document.getElementById("limit");
     var rows = document.getElementById("rows");
     var statusBox = document.getElementById("status");
-    token.value = localStorage.getItem("motiontrace_admin_token") || "";
+    username.value = localStorage.getItem("motiontrace_admin_username") || "admin";
 
     document.getElementById("load").addEventListener("click", load);
     document.getElementById("clear").addEventListener("click", function () {
-      localStorage.removeItem("motiontrace_admin_token");
-      token.value = "";
+      localStorage.removeItem("motiontrace_admin_username");
+      username.value = "admin";
+      password.value = "";
       email.value = "";
-      rows.innerHTML = '<tr><td colspan="8" class="empty">输入管理员 Token 后查询</td></tr>';
+      rows.innerHTML = '<tr><td colspan="8" class="empty">输入管理员账号密码后查询</td></tr>';
       setStatus("未连接", "");
       renderMetrics([]);
     });
-    token.addEventListener("keydown", function (event) {
+    username.addEventListener("keydown", function (event) {
+      if (event.key === "Enter") load();
+    });
+    password.addEventListener("keydown", function (event) {
       if (event.key === "Enter") load();
     });
     email.addEventListener("keydown", function (event) {
@@ -614,19 +638,20 @@ function adminPage() {
     });
 
     async function load() {
-      var adminToken = token.value.trim();
-      if (!adminToken) {
-        setStatus("请输入 Token", "err");
+      var adminUsername = username.value.trim();
+      var adminPassword = password.value;
+      if (!adminUsername || !adminPassword) {
+        setStatus("请输入账号密码", "err");
         return;
       }
-      localStorage.setItem("motiontrace_admin_token", adminToken);
+      localStorage.setItem("motiontrace_admin_username", adminUsername);
       setStatus("查询中", "");
       var params = new URLSearchParams();
       params.set("limit", limit.value);
       if (email.value.trim()) params.set("email", email.value.trim());
       try {
         var response = await fetch("/admin/api/submissions?" + params.toString(), {
-          headers: { Authorization: "Bearer " + adminToken }
+          headers: { Authorization: "Basic " + btoa(adminUsername + ":" + adminPassword) }
         });
         var payload = await response.json().catch(function () { return {}; });
         if (!response.ok) {
@@ -683,8 +708,7 @@ function adminPage() {
     }
 
     function errorMessage(code) {
-      if (code === "admin_not_configured") return "服务端未配置 ADMIN_TOKEN";
-      if (code === "unauthorized") return "Token 不正确";
+      if (code === "unauthorized") return "账号或密码不正确";
       return code || "查询失败";
     }
 

@@ -4,8 +4,10 @@ import android.content.ContentProvider;
 import android.content.ContentValues;
 import android.content.Context;
 import android.database.Cursor;
+import android.database.MatrixCursor;
 import android.net.Uri;
 import android.os.ParcelFileDescriptor;
+import android.provider.OpenableColumns;
 
 import java.io.File;
 import java.io.FileNotFoundException;
@@ -42,7 +44,27 @@ public final class CheckinPhotoProvider extends ContentProvider {
 
     @Override
     public Cursor query(Uri uri, String[] projection, String selection, String[] selectionArgs, String sortOrder) {
-        return null;
+        try {
+            File file = resolvePhotoFile(uri);
+            String[] columns = projection == null
+                    ? new String[]{OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE}
+                    : projection;
+            MatrixCursor cursor = new MatrixCursor(columns, 1);
+            Object[] values = new Object[columns.length];
+            for (int i = 0; i < columns.length; i++) {
+                if (OpenableColumns.DISPLAY_NAME.equals(columns[i])) {
+                    values[i] = file.getName();
+                } else if (OpenableColumns.SIZE.equals(columns[i])) {
+                    values[i] = file.exists() ? file.length() : 0L;
+                } else {
+                    values[i] = null;
+                }
+            }
+            cursor.addRow(values);
+            return cursor;
+        } catch (FileNotFoundException ignored) {
+            return null;
+        }
     }
 
     @Override

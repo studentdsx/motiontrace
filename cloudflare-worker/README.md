@@ -37,14 +37,9 @@ wrangler d1 execute motiontrace --remote --file=./schema.sql
 wrangler deploy
 ```
 
-6. 设置管理后台 Token：
-
-```bash
-wrangler secret put ADMIN_TOKEN
-```
-
 部署后的 Worker URL 填到 Android App 构建配置 `CLOUD_WORKER_URL`，不要让终端用户手动填写。
-管理后台访问 `https://你的-worker-url/admin`，输入 `ADMIN_TOKEN` 后可以查询轨迹提交记录。
+管理后台访问 `https://motiontrace.631581.xyz/admin`，默认账号为 `admin`，默认密码为 `Admin@1357`。
+`wrangler.toml.example` 已配置 `motiontrace.631581.xyz` 为 Worker 自定义域名；自动部署时会使用这个域名。
 
 ## GitHub Actions 自动化部署
 
@@ -66,11 +61,9 @@ wrangler d1 create motiontrace
 CLOUDFLARE_API_TOKEN
 CLOUDFLARE_ACCOUNT_ID
 CLOUDFLARE_D1_DATABASE_ID
-CLOUDFLARE_ADMIN_TOKEN
 ```
 
 `CLOUDFLARE_D1_DATABASE_ID` 填第 2 步拿到的 `database_id`。如果你选择把真实的 `cloudflare-worker/wrangler.toml` 提交到仓库，这个 secret 可以不填。
-`CLOUDFLARE_ADMIN_TOKEN` 自己生成一段足够长的随机字符串，作为管理后台登录 Token。
 
 ### API Token 权限
 
@@ -100,13 +93,12 @@ wrangler d1 execute motiontrace --remote --file=./schema.sql
 wrangler deploy
 ```
 
-部署时会把 GitHub Secret `CLOUDFLARE_ADMIN_TOKEN` 写入 Worker Secret `ADMIN_TOKEN`。
 `schema.sql` 使用 `CREATE TABLE IF NOT EXISTS` 和 `CREATE INDEX IF NOT EXISTS`，所以每次部署前执行是安全的。
 
 部署完成后，可以访问：
 
 ```text
-https://你的-worker-url/health
+https://motiontrace.631581.xyz/health
 ```
 
 返回 `{"ok":true}` 就说明服务端已经可用。
@@ -114,9 +106,10 @@ https://你的-worker-url/health
 管理后台访问：
 
 ```text
-https://你的-worker-url/admin
+https://motiontrace.631581.xyz/admin
 ```
 
+默认账号为 `admin`，默认密码为 `Admin@1357`。
 后台当前展示每次轨迹上传的提交时间、用户邮箱、上传体积、轨迹天数、轨迹点数、行程数和打卡数。
 
 ## 账号逻辑

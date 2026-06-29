@@ -30,7 +30,7 @@ docs/cloud-sync.md     云同步方案说明
 2. 使用 Android Studio 自带 JDK 17。
 3. 安装 Android SDK Platform 36。
 4. 复制 `android-app/gradle.properties.example` 为 `android-app/gradle.properties`。
-5. 填写 `AMAP_KEY`，如需云同步再填写 `CLOUD_WORKER_URL`。
+5. 填写 `AMAP_KEY`；`CLOUD_WORKER_URL` 默认使用 `https://motiontrace.631581.xyz/`。
 6. 连接真机或启动模拟器，点击 Run。
 
 更多 Android 构建和权限说明见 `android-app/README.md`。
@@ -45,7 +45,6 @@ docs/cloud-sync.md     云同步方案说明
 CLOUDFLARE_API_TOKEN
 CLOUDFLARE_ACCOUNT_ID
 CLOUDFLARE_D1_DATABASE_ID
-CLOUDFLARE_ADMIN_TOKEN
 ```
 
 详细部署步骤见 `cloudflare-worker/README.md` 和 `docs/cloud-sync.md`。

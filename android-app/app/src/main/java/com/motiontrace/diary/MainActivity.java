@@ -3,24 +3,31 @@ package com.motiontrace.diary;
 import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.ContentValues;
 import android.content.ClipData;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
+import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.MediaStore;
 import android.provider.Settings;
 import android.text.InputType;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
+import android.widget.AdapterView;
+import android.widget.ArrayAdapter;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
@@ -28,6 +35,7 @@ import android.widget.ImageView;
 import android.widget.ImageButton;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -56,7 +64,10 @@ import com.amap.api.services.geocoder.RegeocodeAddress;
 import com.amap.api.services.geocoder.RegeocodeQuery;
 import com.amap.api.services.geocoder.RegeocodeResult;
 
+import java.io.FileOutputStream;
 import java.io.File;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
@@ -66,6 +77,7 @@ import java.util.List;
 import java.util.Locale;
 
 public final class MainActivity extends Activity {
+    private static final String TAG = "MotionTrace";
     private static final int REQUEST_FOREGROUND_LOCATION = 1001;
     private static final int REQUEST_BACKGROUND_LOCATION = 1002;
     private static final int REQUEST_NOTIFICATIONS = 1003;
@@ -80,6 +92,7 @@ public final class MainActivity extends Activity {
     private static final int TAB_HISTORY = 1;
     private static final int TAB_SETTINGS = 2;
     private static final String AMAP_KEY = BuildConfig.AMAP_KEY;
+    private static final long AUTO_CENTER_MIN_INTERVAL_MS = 30000L;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Runnable refreshRunnable = new Runnable() {
@@ -117,30 +130,35 @@ public final class MainActivity extends Activity {
     private TextureMapView historyMapView;
     private AMap historyAMap;
     private String expandedHistoryDate;
+    private long lastAutoCenterAt;
+    private boolean autoLocationPermissionAsked;
 
     private int pendingLocationAction = ACTION_NONE;
     private boolean startAfterNotificationPermission;
     private AlertDialog activeCheckinDialog;
     private TextView activePhotoCountText;
     private TextView activeAddressText;
-    private Button activeAddressButton;
+    private ImageButton activeAddressButton;
+    private Spinner activeAddressSpinner;
+    private LinearLayout activePhotoPreviewList;
     private EditText activeNoteInput;
     private AMapLocation pendingCheckinLocation;
     private ArrayList<String> pendingPhotoPaths = new ArrayList<>();
+    private ArrayList<String> pendingAddressOptions = new ArrayList<>();
     private String pendingCameraPhotoPath;
+    private Uri pendingCameraPhotoUri;
+    private boolean pendingCameraPhotoFromMediaStore;
     private String pendingCheckinAddress = "";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        MapsInitializer.setApiKey(AMAP_KEY);
-        MapsInitializer.updatePrivacyShow(this, true, true);
-        MapsInitializer.updatePrivacyAgree(this, true);
-        AMapLocationClient.setApiKey(AMAP_KEY);
-        AMapLocationClient.updatePrivacyShow(this, true, true);
-        AMapLocationClient.updatePrivacyAgree(this, true);
+        initAmapSdk();
         if (savedInstanceState != null) {
             pendingCameraPhotoPath = savedInstanceState.getString("pendingCameraPhotoPath");
+            String cameraUri = savedInstanceState.getString("pendingCameraPhotoUri");
+            pendingCameraPhotoUri = cameraUri == null ? null : Uri.parse(cameraUri);
+            pendingCameraPhotoFromMediaStore = savedInstanceState.getBoolean("pendingCameraPhotoFromMediaStore", false);
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             getWindow().setStatusBarColor(color("#F7F4EE"));
@@ -148,6 +166,16 @@ public final class MainActivity extends Activity {
         }
         buildUi(savedInstanceState);
         refreshUi();
+    }
+
+    private void initAmapSdk() {
+        // 高德 SDK 要先完成隐私合规确认，再设置 Key 和创建地图/定位对象。
+        MapsInitializer.updatePrivacyShow(this, true, true);
+        MapsInitializer.updatePrivacyAgree(this, true);
+        MapsInitializer.setApiKey(AMAP_KEY);
+        AMapLocationClient.updatePrivacyShow(this, true, true);
+        AMapLocationClient.updatePrivacyAgree(this, true);
+        AMapLocationClient.setApiKey(AMAP_KEY);
     }
 
     @Override
@@ -161,6 +189,12 @@ public final class MainActivity extends Activity {
         }
         handler.removeCallbacks(refreshRunnable);
         handler.post(refreshRunnable);
+        handler.post(new Runnable() {
+            @Override
+            public void run() {
+                autoCenterMapOnOpen();
+            }
+        });
     }
 
     @Override
@@ -197,6 +231,8 @@ public final class MainActivity extends Activity {
             historyMapView.onSaveInstanceState(outState);
         }
         outState.putString("pendingCameraPhotoPath", pendingCameraPhotoPath);
+        outState.putString("pendingCameraPhotoUri", pendingCameraPhotoUri == null ? null : pendingCameraPhotoUri.toString());
+        outState.putBoolean("pendingCameraPhotoFromMediaStore", pendingCameraPhotoFromMediaStore);
     }
 
     @Override
@@ -205,7 +241,7 @@ public final class MainActivity extends Activity {
         if (requestCode == REQUEST_PICK_IMAGES && resultCode == RESULT_OK && data != null) {
             importPickedImages(data);
         } else if (requestCode == REQUEST_CAPTURE_IMAGE) {
-            importCapturedImage(resultCode == RESULT_OK);
+            importCapturedImage(resultCode == RESULT_OK, data);
         }
     }
 
@@ -291,14 +327,26 @@ public final class MainActivity extends Activity {
         LinearLayout root = pageRoot(todayPage);
 
         LinearLayout header = new LinearLayout(this);
-        header.setGravity(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(Gravity.CENTER_VERTICAL);
         root.addView(header, matchWrap());
+
+        header.addView(buildBrandView(), new LinearLayout.LayoutParams(
+                0,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                1f
+        ));
 
         statusText = text("", 13, color("#1F6F54"), Typeface.BOLD);
         statusText.setGravity(Gravity.CENTER);
         statusText.setPadding(dp(12), dp(7), dp(12), dp(7));
         statusText.setBackground(pill(color("#E5F1EA"), 999f));
-        header.addView(statusText);
+        LinearLayout.LayoutParams statusParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        statusParams.setMargins(dp(10), 0, 0, 0);
+        header.addView(statusText, statusParams);
 
         FrameLayout mapFrame = new FrameLayout(this);
         mapFrame.setBackgroundColor(Color.BLACK);
@@ -601,6 +649,29 @@ public final class MainActivity extends Activity {
         return item;
     }
 
+    private View buildBrandView() {
+        LinearLayout brand = new LinearLayout(this);
+        brand.setOrientation(LinearLayout.HORIZONTAL);
+        brand.setGravity(Gravity.CENTER_VERTICAL);
+
+        ImageView logo = new ImageView(this);
+        logo.setImageResource(R.drawable.ic_launcher);
+        logo.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        LinearLayout.LayoutParams logoParams = new LinearLayout.LayoutParams(dp(34), dp(34));
+        brand.addView(logo, logoParams);
+
+        TextView name = text(getString(R.string.app_name), 18, color("#25302B"), Typeface.BOLD);
+        name.setSingleLine(true);
+        LinearLayout.LayoutParams nameParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        nameParams.setMargins(dp(9), 0, 0, 0);
+        brand.addView(name, nameParams);
+
+        return brand;
+    }
+
     private View buildMapLocateButton() {
         ImageButton button = new ImageButton(this);
         button.setImageResource(R.drawable.ic_locate);
@@ -706,11 +777,16 @@ public final class MainActivity extends Activity {
         locationStyle.strokeColor(color("#661F6F54"));
         locationStyle.radiusFillColor(color("#221F6F54"));
         aMap.setMyLocationStyle(locationStyle);
-        if (hasForegroundLocationPermission()) {
-            try {
-                aMap.setMyLocationEnabled(true);
-            } catch (SecurityException ignored) {
-            }
+        enableMainMapMyLocation();
+    }
+
+    private void enableMainMapMyLocation() {
+        if (aMap == null || !hasForegroundLocationPermission()) {
+            return;
+        }
+        try {
+            aMap.setMyLocationEnabled(true);
+        } catch (SecurityException ignored) {
         }
     }
 
@@ -742,12 +818,7 @@ public final class MainActivity extends Activity {
             return;
         }
         aMap.clear();
-        if (hasForegroundLocationPermission()) {
-            try {
-                aMap.setMyLocationEnabled(true);
-            } catch (SecurityException ignored) {
-            }
-        }
+        enableMainMapMyLocation();
 
         ArrayList<LatLng> route = new ArrayList<>();
         LatLngBounds.Builder boundsBuilder = LatLngBounds.builder();
@@ -1093,15 +1164,40 @@ public final class MainActivity extends Activity {
         if (!ensureForegroundLocation(ACTION_CENTER_MAP)) {
             return;
         }
+        centerMapOnCurrentLocation(true);
+    }
+
+    private void autoCenterMapOnOpen() {
+        if (aMap == null || selectedTab != TAB_TODAY || activeCheckinDialog != null) {
+            return;
+        }
+        if (!hasForegroundLocationPermission()) {
+            if (!autoLocationPermissionAsked) {
+                autoLocationPermissionAsked = true;
+                ensureForegroundLocation(ACTION_CENTER_MAP);
+            }
+            return;
+        }
+
+        long now = System.currentTimeMillis();
+        if (now - lastAutoCenterAt < AUTO_CENTER_MIN_INTERVAL_MS) {
+            return;
+        }
+        lastAutoCenterAt = now;
+        centerMapOnCurrentLocation(false);
+    }
+
+    private void centerMapOnCurrentLocation(boolean showProgress) {
         requestSingleLocation(new SingleLocationCallback() {
             @Override
             public void onLocation(AMapLocation location) {
                 LatLng latLng = new LatLng(location.getLatitude(), location.getLongitude());
                 if (aMap != null) {
+                    enableMainMapMyLocation();
                     aMap.animateCamera(CameraUpdateFactory.newLatLngZoom(latLng, 17f));
                 }
             }
-        });
+        }, showProgress);
     }
 
     private void checkinFlow() {
@@ -1113,7 +1209,7 @@ public final class MainActivity extends Activity {
             public void onLocation(AMapLocation location) {
                 showCheckinDialog(location);
             }
-        });
+        }, true);
     }
 
     private void requestBackgroundLocationFlow() {
@@ -1357,14 +1453,15 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private void requestSingleLocation(final SingleLocationCallback callback) {
+    private void requestSingleLocation(final SingleLocationCallback callback, boolean showProgress) {
         try {
             final AMapLocationClient client = new AMapLocationClient(getApplicationContext());
             AMapLocationClientOption option = new AMapLocationClientOption();
             option.setLocationMode(AMapLocationClientOption.AMapLocationMode.Hight_Accuracy);
+            option.setGpsFirst(true);
             option.setOnceLocationLatest(true);
             option.setNeedAddress(false);
-            option.setLocationCacheEnable(true);
+            option.setLocationCacheEnable(false);
             option.setHttpTimeOut(10000L);
             client.setLocationOption(option);
             client.setLocationListener(new AMapLocationListener() {
@@ -1375,64 +1472,90 @@ public final class MainActivity extends Activity {
                     if (location != null && location.getErrorCode() == 0) {
                         callback.onLocation(location);
                     } else {
-                        toast("定位失败，请检查系统定位和网络");
+                        showLocationFailure(location);
                     }
                 }
             });
-            toast("正在定位");
+            if (showProgress) {
+                toast("正在定位");
+            }
             client.startLocation();
-        } catch (Exception ignored) {
-            toast("无法获取定位服务");
+        } catch (Exception e) {
+            Log.w(TAG, "single location startup failed", e);
+            toastLong("无法获取定位服务：" + cleanText(e.getMessage()));
         }
+    }
+
+    private void showLocationFailure(AMapLocation location) {
+        int code = location == null ? -1 : location.getErrorCode();
+        String info = location == null ? "无定位结果" : cleanText(location.getErrorInfo());
+        String detail = location == null ? "" : cleanText(location.getLocationDetail());
+        Log.w(TAG, "single location failed: code=" + code + ", info=" + info + ", detail=" + detail);
+        toastLong("定位失败：" + code + (info.isEmpty() ? "" : " " + info));
     }
 
     private void showCheckinDialog(AMapLocation location) {
         pendingCheckinLocation = location;
         pendingPhotoPaths = new ArrayList<>();
+        pendingAddressOptions = new ArrayList<>();
         pendingCheckinAddress = "";
+
+        ScrollView dialogScroll = new ScrollView(this);
+        dialogScroll.setFillViewport(false);
 
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
-        int padding = dp(4);
-        box.setPadding(padding, padding, padding, 0);
-
-        TextView locationText = text(
-                String.format(Locale.CHINA, "%.5f, %.5f", location.getLatitude(), location.getLongitude()),
-                13,
-                color("#6F756D"),
-                Typeface.NORMAL
-        );
-        box.addView(locationText);
+        box.setPadding(dp(18), dp(8), dp(18), dp(6));
+        dialogScroll.addView(box, matchWrap());
 
         LinearLayout addressRow = new LinearLayout(this);
         addressRow.setOrientation(LinearLayout.HORIZONTAL);
         addressRow.setGravity(Gravity.CENTER_VERTICAL);
         LinearLayout.LayoutParams addressRowParams = matchWrap();
-        addressRowParams.setMargins(0, dp(8), 0, dp(6));
+        addressRowParams.setMargins(0, dp(2), 0, dp(8));
         box.addView(addressRow, addressRowParams);
 
         activeAddressText = text("未获取地名", 13, color("#6F756D"), Typeface.NORMAL);
+        activeAddressText.setSingleLine(false);
         addressRow.addView(activeAddressText, new LinearLayout.LayoutParams(
                 0,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 1f
         ));
 
-        activeAddressButton = compactButton("地图", false);
+        activeAddressButton = new ImageButton(this);
+        activeAddressButton.setImageResource(R.drawable.ic_map_pin);
+        activeAddressButton.setBackground(outlineButtonBg());
+        activeAddressButton.setScaleType(ImageView.ScaleType.CENTER);
+        activeAddressButton.setPadding(dp(9), dp(9), dp(9), dp(9));
+        activeAddressButton.setContentDescription("获取地名");
         activeAddressButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
                 resolvePendingCheckinAddress();
             }
         });
-        LinearLayout.LayoutParams mapButtonParams = new LinearLayout.LayoutParams(dp(76), ViewGroup.LayoutParams.WRAP_CONTENT);
+        LinearLayout.LayoutParams mapButtonParams = new LinearLayout.LayoutParams(dp(44), dp(44));
         mapButtonParams.setMargins(dp(8), 0, 0, 0);
         addressRow.addView(activeAddressButton, mapButtonParams);
 
+        activeAddressSpinner = new Spinner(this);
+        activeAddressSpinner.setVisibility(View.GONE);
+        activeAddressSpinner.setBackground(outlineButtonBg());
+        LinearLayout.LayoutParams spinnerParams = matchWrap();
+        spinnerParams.setMargins(0, 0, 0, dp(10));
+        box.addView(activeAddressSpinner, spinnerParams);
+
         activeNoteInput = new EditText(this);
         activeNoteInput.setHint("写一句备注");
+        activeNoteInput.setTextSize(15);
+        activeNoteInput.setTextColor(color("#25302B"));
+        activeNoteInput.setHintTextColor(color("#9A8F80"));
+        activeNoteInput.setGravity(Gravity.TOP | Gravity.LEFT);
         activeNoteInput.setMinLines(2);
         activeNoteInput.setMaxLines(4);
+        activeNoteInput.setPadding(dp(12), dp(9), dp(12), dp(9));
+        activeNoteInput.setBackground(outlineButtonBg());
         activeNoteInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
         box.addView(activeNoteInput, matchWrap());
 
@@ -1440,7 +1563,7 @@ public final class MainActivity extends Activity {
         photoRow.setOrientation(LinearLayout.HORIZONTAL);
         photoRow.setGravity(Gravity.CENTER_VERTICAL);
         LinearLayout.LayoutParams photoRowParams = matchWrap();
-        photoRowParams.setMargins(0, dp(10), 0, 0);
+        photoRowParams.setMargins(0, dp(12), 0, 0);
         box.addView(photoRow, photoRowParams);
 
         Button cameraButton = compactButton("拍照", true);
@@ -1464,15 +1587,24 @@ public final class MainActivity extends Activity {
         activePhotoCountText = text("0/9", 14, color("#6F756D"), Typeface.NORMAL);
         photoRow.addView(activePhotoCountText);
 
+        activePhotoPreviewList = new LinearLayout(this);
+        activePhotoPreviewList.setOrientation(LinearLayout.VERTICAL);
+        activePhotoPreviewList.setVisibility(View.GONE);
+        LinearLayout.LayoutParams previewParams = matchWrap();
+        previewParams.setMargins(0, dp(12), 0, 0);
+        box.addView(activePhotoPreviewList, previewParams);
+
         activeCheckinDialog = new AlertDialog.Builder(this)
-                .setTitle("保存打卡")
-                .setView(box)
+                .setCustomTitle(buildCheckinDialogTitle(location))
+                .setView(dialogScroll)
                 .setNegativeButton("取消", null)
-                .setPositiveButton("保存", null)
+                .setPositiveButton("保存打卡", null)
                 .create();
         activeCheckinDialog.setOnShowListener(new android.content.DialogInterface.OnShowListener() {
             @Override
             public void onShow(android.content.DialogInterface dialog) {
+                activeCheckinDialog.getButton(AlertDialog.BUTTON_NEGATIVE).setTextColor(color("#6F756D"));
+                activeCheckinDialog.getButton(AlertDialog.BUTTON_POSITIVE).setTextColor(color("#1F6F54"));
                 activeCheckinDialog
                         .getButton(AlertDialog.BUTTON_POSITIVE)
                         .setOnClickListener(new View.OnClickListener() {
@@ -1490,13 +1622,37 @@ public final class MainActivity extends Activity {
                 activePhotoCountText = null;
                 activeAddressText = null;
                 activeAddressButton = null;
+                activeAddressSpinner = null;
+                activePhotoPreviewList = null;
                 activeNoteInput = null;
                 pendingCheckinLocation = null;
                 pendingPhotoPaths = new ArrayList<>();
+                pendingAddressOptions = new ArrayList<>();
                 pendingCheckinAddress = "";
             }
         });
         activeCheckinDialog.show();
+    }
+
+    private View buildCheckinDialogTitle(AMapLocation location) {
+        LinearLayout title = new LinearLayout(this);
+        title.setOrientation(LinearLayout.HORIZONTAL);
+        title.setGravity(Gravity.CENTER_VERTICAL);
+        title.setPadding(dp(22), dp(18), dp(22), dp(6));
+
+        TextView name = text("保存打卡", 24, color("#25302B"), Typeface.NORMAL);
+        title.addView(name);
+
+        TextView coordinate = text(formatLatLng(location), 14, color("#6F756D"), Typeface.NORMAL);
+        coordinate.setSingleLine(true);
+        LinearLayout.LayoutParams coordinateParams = new LinearLayout.LayoutParams(
+                0,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                1f
+        );
+        coordinateParams.setMargins(dp(10), dp(3), 0, 0);
+        title.addView(coordinate, coordinateParams);
+        return title;
     }
 
     private void resolvePendingCheckinAddress() {
@@ -1506,7 +1662,7 @@ public final class MainActivity extends Activity {
         }
         if (activeAddressButton != null) {
             activeAddressButton.setEnabled(false);
-            activeAddressButton.setText("获取中");
+            activeAddressButton.setAlpha(0.45f);
         }
         if (activeAddressText != null) {
             activeAddressText.setText("正在获取地名");
@@ -1549,43 +1705,101 @@ public final class MainActivity extends Activity {
         if (activeCheckinDialog == null) {
             return;
         }
-        String address = code == 1000 && result != null
-                ? formatRegeocodeAddress(result.getRegeocodeAddress())
-                : "";
-        if (address.isEmpty()) {
+        ArrayList<String> addresses = code == 1000 && result != null
+                ? collectRegeocodeAddressOptions(result.getRegeocodeAddress())
+                : new ArrayList<String>();
+        if (addresses.isEmpty()) {
             pendingCheckinAddress = "";
+            pendingAddressOptions = new ArrayList<>();
+            updateAddressDropdown();
             if (activeAddressText != null) {
                 activeAddressText.setText("未获取地名");
             }
             toast("没有获取到地名");
             return;
         }
-        pendingCheckinAddress = address;
+        pendingAddressOptions = addresses;
+        pendingCheckinAddress = addresses.get(0);
         if (activeAddressText != null) {
-            activeAddressText.setText(address);
+            activeAddressText.setText(pendingCheckinAddress);
         }
-        toast("已获取地名");
+        updateAddressDropdown();
+        toast(addresses.size() > 1 ? "已获取地名，可下拉选择" : "已获取地名");
     }
 
     private void resetAddressButton() {
         if (activeAddressButton != null) {
             activeAddressButton.setEnabled(true);
-            activeAddressButton.setText("地图");
+            activeAddressButton.setAlpha(1f);
         }
     }
 
-    private String formatRegeocodeAddress(RegeocodeAddress address) {
+    private ArrayList<String> collectRegeocodeAddressOptions(RegeocodeAddress address) {
+        ArrayList<String> options = new ArrayList<>();
         if (address == null) {
-            return "";
+            return options;
         }
         List<PoiItem> pois = address.getPois();
-        if (pois != null && !pois.isEmpty()) {
-            String title = cleanText(pois.get(0).getTitle());
-            if (!title.isEmpty()) {
-                return title;
+        if (pois != null) {
+            for (PoiItem poi : pois) {
+                if (options.size() >= 8) {
+                    break;
+                }
+                if (poi != null) {
+                    addAddressOption(options, poi.getTitle());
+                }
             }
         }
-        return cleanText(address.getFormatAddress());
+        addAddressOption(options, address.getFormatAddress());
+        return options;
+    }
+
+    private void addAddressOption(ArrayList<String> options, String value) {
+        String cleaned = cleanText(value);
+        if (!cleaned.isEmpty() && !options.contains(cleaned)) {
+            options.add(cleaned);
+        }
+    }
+
+    private void updateAddressDropdown() {
+        if (activeAddressSpinner == null) {
+            return;
+        }
+        if (pendingAddressOptions.isEmpty()) {
+            activeAddressSpinner.setVisibility(View.GONE);
+            activeAddressSpinner.setAdapter(null);
+            return;
+        }
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(
+                this,
+                android.R.layout.simple_spinner_item,
+                pendingAddressOptions
+        );
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        activeAddressSpinner.setAdapter(adapter);
+        activeAddressSpinner.setVisibility(pendingAddressOptions.size() > 1 ? View.VISIBLE : View.GONE);
+        activeAddressSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                if (position >= 0 && position < pendingAddressOptions.size()) {
+                    pendingCheckinAddress = pendingAddressOptions.get(position);
+                    if (activeAddressText != null) {
+                        activeAddressText.setText(pendingCheckinAddress);
+                    }
+                }
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {
+            }
+        });
+    }
+
+    private String formatLatLng(AMapLocation location) {
+        if (location == null) {
+            return "";
+        }
+        return String.format(Locale.CHINA, "%.5f, %.5f", location.getLatitude(), location.getLongitude());
     }
 
     private String cleanText(String value) {
@@ -1614,11 +1828,22 @@ public final class MainActivity extends Activity {
             toast("最多 9 张照片");
             return;
         }
-        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-        intent.addCategory(Intent.CATEGORY_OPENABLE);
-        intent.setType("image/*");
-        intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
-        startActivityForResult(intent, REQUEST_PICK_IMAGES);
+        int remaining = remainingPhotoSlots();
+        Intent intent;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            intent = new Intent(MediaStore.ACTION_PICK_IMAGES);
+            intent.setType("image/*");
+            int maxPick = Math.min(remaining, MediaStore.getPickImagesMaxLimit());
+            if (maxPick > 1) {
+                intent.putExtra(MediaStore.EXTRA_PICK_IMAGES_MAX, maxPick);
+            }
+        } else {
+            intent = new Intent(Intent.ACTION_GET_CONTENT);
+            intent.addCategory(Intent.CATEGORY_OPENABLE);
+            intent.setType("image/*");
+            intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+        }
+        startActivityForResult(Intent.createChooser(intent, "选择照片"), REQUEST_PICK_IMAGES);
     }
 
     private void openCamera() {
@@ -1627,21 +1852,64 @@ public final class MainActivity extends Activity {
             return;
         }
         File photo = null;
+        Uri outputUri = null;
+        boolean fromMediaStore = false;
         try {
-            photo = CheckinPhotoProvider.createPhotoFile(this);
-            Uri outputUri = CheckinPhotoProvider.uriFor(this, photo);
             Intent intent = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
-            intent.putExtra(MediaStore.EXTRA_OUTPUT, outputUri);
-            intent.setClipData(ClipData.newRawUri("checkin_photo", outputUri));
-            intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            pendingCameraPhotoPath = photo.getAbsolutePath();
-            startActivityForResult(intent, REQUEST_CAPTURE_IMAGE);
-        } catch (Exception ignored) {
-            pendingCameraPhotoPath = null;
-            if (photo != null && photo.exists()) {
-                photo.delete();
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                // Android 10+ 上部分系统相机不会稳定写入外部传入的 URI，直接使用回传缩略图更兼容。
+                pendingCameraPhotoPath = null;
+                pendingCameraPhotoUri = null;
+                pendingCameraPhotoFromMediaStore = false;
+                startActivityForResult(intent, REQUEST_CAPTURE_IMAGE);
+                return;
             }
+            photo = CheckinPhotoProvider.createPhotoFile(this);
+            outputUri = CheckinPhotoProvider.uriFor(this, photo);
+            intent.putExtra(MediaStore.EXTRA_OUTPUT, outputUri);
+            intent.setClipData(ClipData.newUri(getContentResolver(), "checkin_photo", outputUri));
+            intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            grantCameraUriPermissions(intent, outputUri);
+            pendingCameraPhotoPath = photo == null ? null : photo.getAbsolutePath();
+            pendingCameraPhotoUri = outputUri;
+            pendingCameraPhotoFromMediaStore = fromMediaStore;
+            startActivityForResult(intent, REQUEST_CAPTURE_IMAGE);
+        } catch (Exception e) {
+            Log.w(TAG, "camera startup failed", e);
+            deleteCameraOutput(outputUri, photo == null ? null : photo.getAbsolutePath(), fromMediaStore);
+            pendingCameraPhotoPath = null;
+            pendingCameraPhotoUri = null;
+            pendingCameraPhotoFromMediaStore = false;
             toast("无法打开相机");
+        }
+    }
+
+    private Uri createCameraImageUri() {
+        ContentValues values = new ContentValues();
+        values.put(MediaStore.Images.Media.DISPLAY_NAME, "checkin_" + System.currentTimeMillis() + ".jpg");
+        values.put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg");
+        values.put(MediaStore.Images.Media.DATE_TAKEN, System.currentTimeMillis());
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            values.put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/MotionTrace");
+            values.put(MediaStore.Images.Media.IS_PENDING, 1);
+        }
+        Uri uri = getContentResolver().insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
+        if (uri == null) {
+            throw new IllegalStateException("Cannot create camera image uri");
+        }
+        return uri;
+    }
+
+    private void grantCameraUriPermissions(Intent intent, Uri outputUri) {
+        List<ResolveInfo> handlers = getPackageManager().queryIntentActivities(intent, PackageManager.MATCH_DEFAULT_ONLY);
+        for (ResolveInfo handler : handlers) {
+            if (handler.activityInfo != null && handler.activityInfo.packageName != null) {
+                grantUriPermission(
+                        handler.activityInfo.packageName,
+                        outputUri,
+                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_READ_URI_PERMISSION
+                );
+            }
         }
     }
 
@@ -1667,37 +1935,119 @@ public final class MainActivity extends Activity {
             try {
                 pendingPhotoPaths.add(TrackStore.saveImage(this, uri));
                 imported++;
-            } catch (Exception ignored) {
+            } catch (Exception e) {
+                Log.w(TAG, "picked image import failed: " + uri, e);
             }
         }
         updateActivePhotoCount();
-        toast(imported > 0 ? "已添加照片" : "照片读取失败");
+        toast(imported > 0 ? "已添加 " + imported + " 张照片" : "照片读取失败");
     }
 
-    private void importCapturedImage(boolean captured) {
+    // 系统相机返回差异较大：优先读取输出 URI/文件，必要时再使用回传缩略图兜底。
+    private void importCapturedImage(boolean captured, Intent data) {
         String path = pendingCameraPhotoPath;
+        Uri uri = pendingCameraPhotoUri;
+        boolean fromMediaStore = pendingCameraPhotoFromMediaStore;
         pendingCameraPhotoPath = null;
-        if (path == null) {
+        pendingCameraPhotoUri = null;
+        pendingCameraPhotoFromMediaStore = false;
+        if (activeCheckinDialog == null || pendingPhotoPaths.size() >= 9) {
+            deleteCameraOutput(uri, path, fromMediaStore);
             return;
         }
 
-        File photo = new File(path);
-        if (!captured || activeCheckinDialog == null || pendingPhotoPaths.size() >= 9) {
-            if (photo.exists()) {
-                photo.delete();
-            }
-            return;
+        String importedPath = importCameraOutput(uri, path, fromMediaStore);
+        if (importedPath == null) {
+            importedPath = saveCameraThumbnail(data);
         }
 
-        if (photo.exists() && photo.length() > 0) {
-            pendingPhotoPaths.add(path);
+        if (importedPath != null) {
+            pendingPhotoPaths.add(importedPath);
             updateActivePhotoCount();
             toast("已添加照片");
         } else {
-            if (photo.exists()) {
-                photo.delete();
+            toast(captured ? "照片保存失败" : "未拍摄照片");
+        }
+        if (fromMediaStore) {
+            deleteCameraOutput(uri, null, true);
+        } else if (importedPath == null) {
+            deleteCameraOutput(null, path, false);
+        }
+    }
+
+    private String importCameraOutput(Uri uri, String path, boolean fromMediaStore) {
+        try {
+            if (fromMediaStore && uri != null && uriHasContent(uri)) {
+                return TrackStore.saveImage(this, uri);
             }
-            toast("照片保存失败");
+            if (!fromMediaStore && path != null) {
+                File photo = new File(path);
+                if (photo.exists() && photo.length() > 0) {
+                    return path;
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "camera image import failed", e);
+        }
+        return null;
+    }
+
+    private boolean uriHasContent(Uri uri) {
+        if (uri == null) {
+            return false;
+        }
+        try (InputStream input = getContentResolver().openInputStream(uri)) {
+            return input != null && input.read() != -1;
+        } catch (Exception e) {
+            Log.w(TAG, "camera uri check failed: " + uri, e);
+            return false;
+        }
+    }
+
+    private String saveCameraThumbnail(Intent data) {
+        if (data == null || data.getExtras() == null) {
+            return null;
+        }
+        Object value = data.getExtras().get("data");
+        if (!(value instanceof Bitmap)) {
+            return null;
+        }
+        File dir = new File(getFilesDir(), "checkin_photos");
+        if (!dir.exists() && !dir.mkdirs()) {
+            return null;
+        }
+        File outFile = new File(dir, "camera_thumb_" + System.currentTimeMillis() + ".jpg");
+        try (OutputStream output = new FileOutputStream(outFile)) {
+            Bitmap bitmap = (Bitmap) value;
+            if (!bitmap.compress(Bitmap.CompressFormat.JPEG, 92, output)) {
+                if (outFile.exists()) {
+                    outFile.delete();
+                }
+                return null;
+            }
+            return outFile.getAbsolutePath();
+        } catch (Exception e) {
+            Log.w(TAG, "camera thumbnail save failed", e);
+            if (outFile.exists()) {
+                outFile.delete();
+            }
+            return null;
+        }
+    }
+
+    private void deleteCameraOutput(Uri uri, String path, boolean fromMediaStore) {
+        if (fromMediaStore && uri != null) {
+            try {
+                getContentResolver().delete(uri, null, null);
+            } catch (Exception e) {
+                Log.w(TAG, "camera media cleanup failed: " + uri, e);
+            }
+        }
+        if (!fromMediaStore && path != null) {
+            File photo = new File(path);
+            if (photo.exists() && !photo.delete()) {
+                Log.w(TAG, "camera file cleanup failed: " + path);
+            }
         }
     }
 
@@ -1705,6 +2055,94 @@ public final class MainActivity extends Activity {
         if (activePhotoCountText != null) {
             activePhotoCountText.setText(pendingPhotoPaths.size() + "/9");
         }
+        updateActivePhotoPreview();
+    }
+
+    private void updateActivePhotoPreview() {
+        if (activePhotoPreviewList == null) {
+            return;
+        }
+        activePhotoPreviewList.removeAllViews();
+        if (pendingPhotoPaths.isEmpty()) {
+            activePhotoPreviewList.setVisibility(View.GONE);
+            return;
+        }
+        activePhotoPreviewList.setVisibility(View.VISIBLE);
+        LinearLayout row = null;
+        for (int i = 0; i < pendingPhotoPaths.size(); i++) {
+            if (i % 3 == 0) {
+                row = new LinearLayout(this);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                LinearLayout.LayoutParams rowParams = matchWrap();
+                rowParams.setMargins(0, 0, 0, dp(8));
+                activePhotoPreviewList.addView(row, rowParams);
+            }
+            if (row != null) {
+                row.addView(pendingPhotoThumb(i, i % 3));
+            }
+        }
+        int remainder = pendingPhotoPaths.size() % 3;
+        if (row != null && remainder != 0) {
+            for (int column = remainder; column < 3; column++) {
+                View spacer = new View(this);
+                spacer.setLayoutParams(photoGridCellParams(column));
+                row.addView(spacer);
+            }
+        }
+    }
+
+    private View pendingPhotoThumb(final int index, int column) {
+        FrameLayout frame = new FrameLayout(this);
+        frame.setLayoutParams(photoGridCellParams(column));
+        frame.setBackground(cardBg());
+        frame.setPadding(dp(2), dp(2), dp(2), dp(2));
+
+        final String path = pendingPhotoPaths.get(index);
+        ImageView image = new ImageView(this);
+        image.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        image.setBackgroundColor(color("#ECE7DD"));
+        image.setImageURI(Uri.fromFile(new File(path)));
+        image.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                previewPhoto(path);
+            }
+        });
+        frame.addView(image, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+        ));
+
+        TextView remove = text("X", 10, Color.WHITE, Typeface.BOLD);
+        remove.setGravity(Gravity.CENTER);
+        remove.setBackground(pill(color("#B94F44"), 999f));
+        remove.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                removePendingPhoto(index);
+            }
+        });
+        FrameLayout.LayoutParams removeParams = new FrameLayout.LayoutParams(dp(20), dp(20), Gravity.RIGHT | Gravity.TOP);
+        frame.addView(remove, removeParams);
+        return frame;
+    }
+
+    private LinearLayout.LayoutParams photoGridCellParams(int column) {
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(82), 1f);
+        params.setMargins(column == 0 ? 0 : dp(4), 0, column == 2 ? 0 : dp(4), 0);
+        return params;
+    }
+
+    private void removePendingPhoto(int index) {
+        if (index < 0 || index >= pendingPhotoPaths.size()) {
+            return;
+        }
+        pendingPhotoPaths.remove(index);
+        updateActivePhotoCount();
+    }
+
+    private int remainingPhotoSlots() {
+        return Math.max(0, 9 - pendingPhotoPaths.size());
     }
 
     private void savePendingCheckin() {
@@ -2000,6 +2438,10 @@ public final class MainActivity extends Activity {
 
     private void toast(String message) {
         Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
+    }
+
+    private void toastLong(String message) {
+        Toast.makeText(this, message, Toast.LENGTH_LONG).show();
     }
 
     private interface SingleLocationCallback {

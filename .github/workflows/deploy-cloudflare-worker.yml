@@ -44,12 +44,8 @@ jobs:
 
       - name: Deploy Worker
         uses: cloudflare/wrangler-action@v3
-        env:
-          ADMIN_TOKEN: ${{ secrets.CLOUDFLARE_ADMIN_TOKEN }}
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: cloudflare-worker
-          secrets: |
-            ADMIN_TOKEN
           command: deploy

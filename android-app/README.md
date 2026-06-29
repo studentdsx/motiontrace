@@ -20,7 +20,7 @@
 2. 用 Android Studio 打开 `android-app` 目录。
 3. 使用 Android Studio 自带 JDK 17 运行 Gradle Sync。
 4. 安装 Android SDK Platform 36。
-5. 复制 `gradle.properties.example` 为 `gradle.properties`，并填写 `AMAP_KEY` 和 `CLOUD_WORKER_URL`。
+5. 复制 `gradle.properties.example` 为 `gradle.properties`，并填写 `AMAP_KEY`；`CLOUD_WORKER_URL` 默认使用 `https://motiontrace.631581.xyz/`。
 6. 连接 Android 真机，点击 Run。
 7. 首次启动后允许精确定位和通知权限。
 8. 如果需要更强的后台恢复能力，点击“后台权限”并在系统设置里选择“始终允许”。
@@ -31,7 +31,7 @@
 - 如果用户手动停止通知对应的服务、强制停止应用、系统极端省电策略杀进程，记录会中断。
 - 上架 Google Play 时，`ACCESS_BACKGROUND_LOCATION` 会触发位置权限审核，需要证明后台定位是核心功能。
 - 当前已接入高德地图 SDK，Key 从本地 `gradle.properties` 的 `AMAP_KEY` 注入，避免提交到 Git 仓库。
-- 云同步服务地址从本地 `gradle.properties` 的 `CLOUD_WORKER_URL` 注入，用户不需要也不应该手动填写 Worker URL。
+- 云同步服务地址从本地 `gradle.properties` 的 `CLOUD_WORKER_URL` 注入，默认指向 `https://motiontrace.631581.xyz/`，用户不需要也不应该手动填写 Worker URL。
 - 高德 Key 必须在高德开放平台绑定当前包名 `com.motiontrace.diary` 和你的签名 SHA1；Debug 和 Release 签名需要分别配置，否则真机地图可能空白或鉴权失败。
 - 当前项目使用 `compileSdk 36`、`targetSdk 35`、Build Tools 36.1.0 和 Android Gradle Plugin 8.10.1，需要 Gradle 8.11.1、JDK 17 或更新版本、Android SDK Platform 36。请用新版 Android Studio 打开后构建。
 
