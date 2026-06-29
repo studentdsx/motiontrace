@@ -5,9 +5,6 @@ Thumbs.db
 .vscode/
 *.iml
 
-# WeChat DevTools local settings
-project.private.config.json
-
 # Android local build output and machine-specific config
 android-app/.gradle/
 android-app/build/

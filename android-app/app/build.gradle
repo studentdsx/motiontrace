@@ -1,6 +1,8 @@
 apply plugin: "com.android.application"
 
 def amapKey = providers.gradleProperty("AMAP_KEY").orElse("").get()
+def cloudWorkerUrl = providers.gradleProperty("CLOUD_WORKER_URL").orElse("").get()
+def javaString = { value -> value.replace("\\", "\\\\").replace("\"", "\\\"") }
 
 android {
     namespace "com.motiontrace.diary"
@@ -14,7 +16,8 @@ android {
         versionCode 1
         versionName "1.0.0"
         manifestPlaceholders = [AMAP_KEY: amapKey]
-        buildConfigField "String", "AMAP_KEY", "\"${amapKey}\""
+        buildConfigField "String", "AMAP_KEY", "\"${javaString(amapKey)}\""
+        buildConfigField "String", "CLOUD_WORKER_URL", "\"${javaString(cloudWorkerUrl)}\""
     }
 
     buildFeatures {

@@ -22,9 +22,11 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 final class TrackStore {
     private static final String STORE_FILE = "motion_tracks_v1.json";
@@ -132,7 +134,7 @@ final class TrackStore {
         if (!isUsable(location)) {
             return getDay(context, date);
         }
-        return addCheckin(context, date, location.getLatitude(), location.getLongitude(), note, photos);
+        return addCheckin(context, date, location.getLatitude(), location.getLongitude(), note, "", photos);
     }
 
     static synchronized DayRecord addCheckin(
@@ -142,7 +144,21 @@ final class TrackStore {
             String note,
             List<String> photos
     ) {
-        return addCheckin(context, date, location.getLatitude(), location.getLongitude(), note, photos);
+        return addCheckin(context, date, location, note, locationAddress(location), photos);
+    }
+
+    static synchronized DayRecord addCheckin(
+            Context context,
+            String date,
+            AMapLocation location,
+            String note,
+            String address,
+            List<String> photos
+    ) {
+        if (!isUsable(location)) {
+            return getDay(context, date);
+        }
+        return addCheckin(context, date, location.getLatitude(), location.getLongitude(), note, address, photos);
     }
 
     static synchronized DayRecord addCheckin(
@@ -151,6 +167,18 @@ final class TrackStore {
             double latitude,
             double longitude,
             String note,
+            List<String> photos
+    ) {
+        return addCheckin(context, date, latitude, longitude, note, "", photos);
+    }
+
+    static synchronized DayRecord addCheckin(
+            Context context,
+            String date,
+            double latitude,
+            double longitude,
+            String note,
+            String address,
             List<String> photos
     ) {
         JSONObject root = readRoot(context);
@@ -170,6 +198,7 @@ final class TrackStore {
             checkin.put("longitude", longitude);
             checkin.put("timestamp", timestamp);
             checkin.put("note", note == null ? "" : note);
+            checkin.put("address", cleanAddress(address));
 
             JSONArray photoArray = new JSONArray();
             if (photos != null) {
@@ -196,6 +225,41 @@ final class TrackStore {
         }
 
         return parseDay(day);
+    }
+
+    static synchronized List<AddressStat> listCommonAddresses(Context context, int limit) {
+        Map<String, AddressStat> byAddress = new HashMap<>();
+        for (DayRecord day : listDays(context)) {
+            for (CheckinRecord checkin : day.checkins) {
+                String address = cleanAddress(checkin.address);
+                if (address.isEmpty()) {
+                    continue;
+                }
+                AddressStat stat = byAddress.get(address);
+                if (stat == null) {
+                    stat = new AddressStat();
+                    stat.address = address;
+                    stat.latitude = checkin.latitude;
+                    stat.longitude = checkin.longitude;
+                    byAddress.put(address, stat);
+                }
+                stat.count++;
+                stat.lastTimestamp = Math.max(stat.lastTimestamp, checkin.timestamp);
+            }
+        }
+
+        List<AddressStat> stats = new ArrayList<>(byAddress.values());
+        Collections.sort(stats, new Comparator<AddressStat>() {
+            @Override
+            public int compare(AddressStat a, AddressStat b) {
+                if (a.count != b.count) {
+                    return b.count - a.count;
+                }
+                return Long.compare(b.lastTimestamp, a.lastTimestamp);
+            }
+        });
+        int size = Math.max(0, Math.min(limit, stats.size()));
+        return new ArrayList<>(stats.subList(0, size));
     }
 
     static synchronized void startTrip(Context context) {
@@ -519,6 +583,7 @@ final class TrackStore {
         checkin.longitude = object.optDouble("longitude", 0.0);
         checkin.timestamp = object.optLong("timestamp", 0L);
         checkin.note = object.optString("note", "");
+        checkin.address = object.optString("address", "");
         JSONArray photos = object.optJSONArray("photos");
         if (photos != null) {
             for (int i = 0; i < photos.length(); i++) {
@@ -529,6 +594,21 @@ final class TrackStore {
             }
         }
         return checkin;
+    }
+
+    private static String locationAddress(AMapLocation location) {
+        if (location == null) {
+            return "";
+        }
+        String poiName = cleanAddress(location.getPoiName());
+        if (!poiName.isEmpty()) {
+            return poiName;
+        }
+        return cleanAddress(location.getAddress());
+    }
+
+    private static String cleanAddress(String value) {
+        return value == null ? "" : value.trim().replaceAll("\\s+", " ");
     }
 
     private static String formatDistance(double meters) {
@@ -572,7 +652,16 @@ final class TrackStore {
         double longitude;
         long timestamp;
         String note;
+        String address;
         final List<String> photos = new ArrayList<>();
+    }
+
+    static final class AddressStat {
+        String address;
+        int count;
+        long lastTimestamp;
+        double latitude;
+        double longitude;
     }
 
     static final class Stats {

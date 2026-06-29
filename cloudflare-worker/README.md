@@ -4,7 +4,7 @@
 
 ## 可行性边界
 
-- 适合存储用户账号、登录会话、轨迹 JSON 快照、行程、打卡文字。
+- 适合存储用户账号、登录会话、轨迹 JSON 快照、行程、打卡地名和文字。
 - 当前版本不上传打卡照片原图，照片仍保存在手机本地。
 - 如果后续需要同步照片，建议新增 Cloudflare R2，不建议把图片塞进 D1。
 
@@ -37,7 +37,14 @@ wrangler d1 execute motiontrace --remote --file=./schema.sql
 wrangler deploy
 ```
 
-部署后的 Worker URL 填到 Android App 的“我的”页云同步地址里。
+6. 设置管理后台 Token：
+
+```bash
+wrangler secret put ADMIN_TOKEN
+```
+
+部署后的 Worker URL 填到 Android App 构建配置 `CLOUD_WORKER_URL`，不要让终端用户手动填写。
+管理后台访问 `https://你的-worker-url/admin`，输入 `ADMIN_TOKEN` 后可以查询轨迹提交记录。
 
 ## GitHub Actions 自动化部署
 
@@ -59,9 +66,11 @@ wrangler d1 create motiontrace
 CLOUDFLARE_API_TOKEN
 CLOUDFLARE_ACCOUNT_ID
 CLOUDFLARE_D1_DATABASE_ID
+CLOUDFLARE_ADMIN_TOKEN
 ```
 
 `CLOUDFLARE_D1_DATABASE_ID` 填第 2 步拿到的 `database_id`。如果你选择把真实的 `cloudflare-worker/wrangler.toml` 提交到仓库，这个 secret 可以不填。
+`CLOUDFLARE_ADMIN_TOKEN` 自己生成一段足够长的随机字符串，作为管理后台登录 Token。
 
 ### API Token 权限
 
@@ -91,6 +100,7 @@ wrangler d1 execute motiontrace --remote --file=./schema.sql
 wrangler deploy
 ```
 
+部署时会把 GitHub Secret `CLOUDFLARE_ADMIN_TOKEN` 写入 Worker Secret `ADMIN_TOKEN`。
 `schema.sql` 使用 `CREATE TABLE IF NOT EXISTS` 和 `CREATE INDEX IF NOT EXISTS`，所以每次部署前执行是安全的。
 
 部署完成后，可以访问：
@@ -100,3 +110,18 @@ https://你的-worker-url/health
 ```
 
 返回 `{"ok":true}` 就说明服务端已经可用。
+
+管理后台访问：
+
+```text
+https://你的-worker-url/admin
+```
+
+后台当前展示每次轨迹上传的提交时间、用户邮箱、上传体积、轨迹天数、轨迹点数、行程数和打卡数。
+
+## 账号逻辑
+
+- 注册：`POST /auth/register`，邮箱唯一，密码至少 8 位。
+- 登录：`POST /auth/login`，成功后返回 30 天有效的 bearer token。
+- 修改密码：`POST /auth/change-password`，需要登录 token、当前密码和新密码；修改成功后会保留当前会话并清理其他旧会话。
+- 密码哈希：新注册和改密码使用 PBKDF2-SHA256；旧 SHA-256 哈希用户登录成功后会自动升级。

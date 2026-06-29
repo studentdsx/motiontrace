@@ -48,6 +48,13 @@ import com.amap.api.maps.model.Marker;
 import com.amap.api.maps.model.MarkerOptions;
 import com.amap.api.maps.model.MyLocationStyle;
 import com.amap.api.maps.model.PolylineOptions;
+import com.amap.api.services.core.LatLonPoint;
+import com.amap.api.services.core.PoiItem;
+import com.amap.api.services.geocoder.GeocodeResult;
+import com.amap.api.services.geocoder.GeocodeSearch;
+import com.amap.api.services.geocoder.RegeocodeAddress;
+import com.amap.api.services.geocoder.RegeocodeQuery;
+import com.amap.api.services.geocoder.RegeocodeResult;
 
 import java.io.File;
 import java.text.ParseException;
@@ -91,9 +98,10 @@ public final class MainActivity extends Activity {
     private TextView backgroundText;
     private TextView historyCountText;
     private TextView cloudStatusText;
-    private EditText cloudUrlInput;
+    private LinearLayout commonAddressList;
     private EditText cloudEmailInput;
     private EditText cloudPasswordInput;
+    private EditText cloudNewPasswordInput;
     private Button recordButton;
     private Button backgroundButton;
     private LinearLayout checkinList;
@@ -114,10 +122,13 @@ public final class MainActivity extends Activity {
     private boolean startAfterNotificationPermission;
     private AlertDialog activeCheckinDialog;
     private TextView activePhotoCountText;
+    private TextView activeAddressText;
+    private Button activeAddressButton;
     private EditText activeNoteInput;
     private AMapLocation pendingCheckinLocation;
     private ArrayList<String> pendingPhotoPaths = new ArrayList<>();
     private String pendingCameraPhotoPath;
+    private String pendingCheckinAddress = "";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -394,6 +405,10 @@ public final class MainActivity extends Activity {
 
         root.addView(buildCloudCard(), matchWrap());
 
+        LinearLayout.LayoutParams addressParams = matchWrap();
+        addressParams.setMargins(0, dp(14), 0, 0);
+        root.addView(buildCommonAddressCard(), addressParams);
+
         LinearLayout permissionCard = new LinearLayout(this);
         permissionCard.setOrientation(LinearLayout.VERTICAL);
         permissionCard.setPadding(dp(14), dp(12), dp(14), dp(14));
@@ -457,12 +472,12 @@ public final class MainActivity extends Activity {
         cloudStatusText.setPadding(0, dp(8), 0, dp(10));
         card.addView(cloudStatusText);
 
-        cloudUrlInput = input("Worker 地址，例如 https://xxx.workers.dev", false);
         cloudEmailInput = input("邮箱", false);
-        cloudPasswordInput = input("密码，至少 8 位", true);
-        card.addView(cloudUrlInput, inputParams(0));
-        card.addView(cloudEmailInput, inputParams(dp(8)));
+        cloudPasswordInput = input("密码，登录或改密时填写", true);
+        cloudNewPasswordInput = input("新密码，改密码时填写", true);
+        card.addView(cloudEmailInput, inputParams(0));
         card.addView(cloudPasswordInput, inputParams(dp(8)));
+        card.addView(cloudNewPasswordInput, inputParams(dp(8)));
 
         LinearLayout authRow = new LinearLayout(this);
         authRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -487,6 +502,17 @@ public final class MainActivity extends Activity {
             }
         });
         authRow.addView(loginButton, weightedButtonParams(1f, dp(5), 0));
+
+        Button changePasswordButton = button("修改密码", false);
+        changePasswordButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                changeCloudPassword();
+            }
+        });
+        LinearLayout.LayoutParams passwordParams = matchWrap();
+        passwordParams.setMargins(0, dp(10), 0, 0);
+        card.addView(changePasswordButton, passwordParams);
 
         LinearLayout syncRow = new LinearLayout(this);
         syncRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -526,6 +552,25 @@ public final class MainActivity extends Activity {
         card.addView(logoutButton, logoutParams);
 
         refreshCloudUi();
+        return card;
+    }
+
+    private View buildCommonAddressCard() {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(14), dp(12), dp(14), dp(14));
+        card.setBackground(cardBg());
+
+        TextView title = text("常用地址", 18, color("#25302B"), Typeface.BOLD);
+        card.addView(title);
+
+        commonAddressList = new LinearLayout(this);
+        commonAddressList.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams listParams = matchWrap();
+        listParams.setMargins(0, dp(8), 0, 0);
+        card.addView(commonAddressList, listParams);
+
+        refreshCommonAddressUi();
         return card;
     }
 
@@ -740,10 +785,9 @@ public final class MainActivity extends Activity {
             LatLng latLng = new LatLng(checkin.latitude, checkin.longitude);
             boundsBuilder.include(latLng);
             hasBounds = true;
-            String note = checkin.note == null || checkin.note.isEmpty() ? "打卡" : checkin.note;
             aMap.addMarker(new MarkerOptions()
                     .position(latLng)
-                    .title(note)
+                    .title(checkinTitle(checkin))
                     .snippet(TrackStore.formatClock(checkin.timestamp))
                     .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_AZURE)));
         }
@@ -965,7 +1009,7 @@ public final class MainActivity extends Activity {
             hasBounds = true;
             Marker marker = historyAMap.addMarker(new MarkerOptions()
                     .position(latLng)
-                    .title(checkin.note == null || checkin.note.isEmpty() ? "打卡" : checkin.note)
+                    .title(checkinTitle(checkin))
                     .snippet(TrackStore.formatClock(checkin.timestamp))
                     .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_AZURE)));
             if (marker != null) {
@@ -998,6 +1042,12 @@ public final class MainActivity extends Activity {
 
         TextView time = text(TrackStore.formatClock(checkin.timestamp), 13, color("#6F756D"), Typeface.BOLD);
         box.addView(time);
+
+        if (hasText(checkin.address)) {
+            TextView address = text(checkin.address, 15, color("#1F6F54"), Typeface.BOLD);
+            address.setPadding(0, dp(8), 0, 0);
+            box.addView(address);
+        }
 
         String note = checkin.note == null || checkin.note.isEmpty() ? "没有文字备注" : checkin.note;
         TextView noteView = text(note, 15, color("#25302B"), Typeface.NORMAL);
@@ -1100,27 +1150,41 @@ public final class MainActivity extends Activity {
     }
 
     private void registerCloudAccount() {
-        final String baseUrl = inputValue(cloudUrlInput);
         final String email = inputValue(cloudEmailInput);
         final String password = inputValue(cloudPasswordInput);
         runCloudTask("正在注册", new CloudTask() {
             @Override
             public String run() throws Exception {
-                new CloudSyncClient(MainActivity.this).register(baseUrl, email, password);
+                new CloudSyncClient(MainActivity.this).register(email, password);
                 return "注册并登录成功";
             }
         });
     }
 
     private void loginCloudAccount() {
-        final String baseUrl = inputValue(cloudUrlInput);
         final String email = inputValue(cloudEmailInput);
         final String password = inputValue(cloudPasswordInput);
         runCloudTask("正在登录", new CloudTask() {
             @Override
             public String run() throws Exception {
-                new CloudSyncClient(MainActivity.this).login(baseUrl, email, password);
+                new CloudSyncClient(MainActivity.this).login(email, password);
                 return "登录成功";
+            }
+        });
+    }
+
+    private void changeCloudPassword() {
+        final String currentPassword = inputValue(cloudPasswordInput);
+        final String newPassword = inputValue(cloudNewPasswordInput);
+        runCloudTask("正在修改密码", new CloudTask() {
+            @Override
+            public String run() throws Exception {
+                CloudSyncClient client = new CloudSyncClient(MainActivity.this);
+                if (!client.isLoggedIn()) {
+                    throw new IllegalStateException("请先登录");
+                }
+                client.changePassword(currentPassword, newPassword);
+                return "密码已修改";
             }
         });
     }
@@ -1179,6 +1243,11 @@ public final class MainActivity extends Activity {
                         public void run() {
                             refreshCloudUi();
                             refreshUi();
+                            if ("注册并登录成功".equals(message)
+                                    || "登录成功".equals(message)
+                                    || "密码已修改".equals(message)) {
+                                clearCloudPasswordInputs();
+                            }
                             toast(message);
                         }
                     });
@@ -1194,22 +1263,72 @@ public final class MainActivity extends Activity {
         }).start();
     }
 
+    private void clearCloudPasswordInputs() {
+        if (cloudPasswordInput != null) {
+            cloudPasswordInput.setText("");
+        }
+        if (cloudNewPasswordInput != null) {
+            cloudNewPasswordInput.setText("");
+        }
+    }
+
     private void refreshCloudUi() {
         if (cloudStatusText == null) {
             return;
         }
         CloudSyncClient client = new CloudSyncClient(this);
-        if (cloudUrlInput != null && cloudUrlInput.getText().length() == 0) {
-            cloudUrlInput.setText(client.getBaseUrl());
-        }
         if (cloudEmailInput != null && cloudEmailInput.getText().length() == 0) {
             cloudEmailInput.setText(client.getEmail());
         }
-        if (client.isLoggedIn()) {
+        if (!client.isConfigured()) {
+            cloudStatusText.setText("云同步服务未配置，当前只使用本机数据。");
+        } else if (client.isLoggedIn()) {
             cloudStatusText.setText("已登录：" + client.getEmail() + "。当前同步不上传照片原图。");
         } else {
             cloudStatusText.setText("未登录。可选云同步会上传轨迹、行程和打卡文字，照片仍保留本机。");
         }
+    }
+
+    private void refreshCommonAddressUi() {
+        if (commonAddressList == null) {
+            return;
+        }
+        commonAddressList.removeAllViews();
+        List<TrackStore.AddressStat> stats = TrackStore.listCommonAddresses(this, 5);
+        if (stats.isEmpty()) {
+            TextView empty = text("暂无常用地址", 14, color("#6F756D"), Typeface.NORMAL);
+            empty.setPadding(0, dp(4), 0, 0);
+            commonAddressList.addView(empty);
+            return;
+        }
+        for (TrackStore.AddressStat stat : stats) {
+            commonAddressList.addView(commonAddressRow(stat));
+        }
+    }
+
+    private View commonAddressRow(TrackStore.AddressStat stat) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(0, dp(7), 0, dp(7));
+
+        LinearLayout textBox = new LinearLayout(this);
+        textBox.setOrientation(LinearLayout.VERTICAL);
+        row.addView(textBox, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        TextView address = text(stat.address, 15, color("#25302B"), Typeface.BOLD);
+        textBox.addView(address);
+
+        TextView count = text(stat.count + " 次打卡", 12, color("#6F756D"), Typeface.NORMAL);
+        count.setPadding(0, dp(3), 0, 0);
+        textBox.addView(count);
+
+        TextView badge = text("常用", 12, color("#1F6F54"), Typeface.BOLD);
+        badge.setGravity(Gravity.CENTER);
+        badge.setPadding(dp(9), dp(5), dp(9), dp(5));
+        badge.setBackground(pill(color("#E8F2EA"), 999f));
+        row.addView(badge);
+        return row;
     }
 
     private boolean ensureForegroundLocation(int action) {
@@ -1270,6 +1389,7 @@ public final class MainActivity extends Activity {
     private void showCheckinDialog(AMapLocation location) {
         pendingCheckinLocation = location;
         pendingPhotoPaths = new ArrayList<>();
+        pendingCheckinAddress = "";
 
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
@@ -1283,6 +1403,31 @@ public final class MainActivity extends Activity {
                 Typeface.NORMAL
         );
         box.addView(locationText);
+
+        LinearLayout addressRow = new LinearLayout(this);
+        addressRow.setOrientation(LinearLayout.HORIZONTAL);
+        addressRow.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams addressRowParams = matchWrap();
+        addressRowParams.setMargins(0, dp(8), 0, dp(6));
+        box.addView(addressRow, addressRowParams);
+
+        activeAddressText = text("未获取地名", 13, color("#6F756D"), Typeface.NORMAL);
+        addressRow.addView(activeAddressText, new LinearLayout.LayoutParams(
+                0,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                1f
+        ));
+
+        activeAddressButton = compactButton("地图", false);
+        activeAddressButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                resolvePendingCheckinAddress();
+            }
+        });
+        LinearLayout.LayoutParams mapButtonParams = new LinearLayout.LayoutParams(dp(76), ViewGroup.LayoutParams.WRAP_CONTENT);
+        mapButtonParams.setMargins(dp(8), 0, 0, 0);
+        addressRow.addView(activeAddressButton, mapButtonParams);
 
         activeNoteInput = new EditText(this);
         activeNoteInput.setHint("写一句备注");
@@ -1343,12 +1488,125 @@ public final class MainActivity extends Activity {
             public void onDismiss(android.content.DialogInterface dialog) {
                 activeCheckinDialog = null;
                 activePhotoCountText = null;
+                activeAddressText = null;
+                activeAddressButton = null;
                 activeNoteInput = null;
                 pendingCheckinLocation = null;
                 pendingPhotoPaths = new ArrayList<>();
+                pendingCheckinAddress = "";
             }
         });
         activeCheckinDialog.show();
+    }
+
+    private void resolvePendingCheckinAddress() {
+        if (pendingCheckinLocation == null) {
+            toast("没有可用位置");
+            return;
+        }
+        if (activeAddressButton != null) {
+            activeAddressButton.setEnabled(false);
+            activeAddressButton.setText("获取中");
+        }
+        if (activeAddressText != null) {
+            activeAddressText.setText("正在获取地名");
+        }
+
+        try {
+            GeocodeSearch search = new GeocodeSearch(this);
+            search.setOnGeocodeSearchListener(new GeocodeSearch.OnGeocodeSearchListener() {
+                @Override
+                public void onRegeocodeSearched(final RegeocodeResult result, final int code) {
+                    handler.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            handleResolvedAddress(result, code);
+                        }
+                    });
+                }
+
+                @Override
+                public void onGeocodeSearched(GeocodeResult result, int code) {
+                }
+            });
+            LatLonPoint point = new LatLonPoint(
+                    pendingCheckinLocation.getLatitude(),
+                    pendingCheckinLocation.getLongitude()
+            );
+            RegeocodeQuery query = new RegeocodeQuery(point, 300f, GeocodeSearch.AMAP);
+            search.getFromLocationAsyn(query);
+        } catch (Exception ignored) {
+            resetAddressButton();
+            if (activeAddressText != null) {
+                activeAddressText.setText("未获取地名");
+            }
+            toast("无法获取地名");
+        }
+    }
+
+    private void handleResolvedAddress(RegeocodeResult result, int code) {
+        resetAddressButton();
+        if (activeCheckinDialog == null) {
+            return;
+        }
+        String address = code == 1000 && result != null
+                ? formatRegeocodeAddress(result.getRegeocodeAddress())
+                : "";
+        if (address.isEmpty()) {
+            pendingCheckinAddress = "";
+            if (activeAddressText != null) {
+                activeAddressText.setText("未获取地名");
+            }
+            toast("没有获取到地名");
+            return;
+        }
+        pendingCheckinAddress = address;
+        if (activeAddressText != null) {
+            activeAddressText.setText(address);
+        }
+        toast("已获取地名");
+    }
+
+    private void resetAddressButton() {
+        if (activeAddressButton != null) {
+            activeAddressButton.setEnabled(true);
+            activeAddressButton.setText("地图");
+        }
+    }
+
+    private String formatRegeocodeAddress(RegeocodeAddress address) {
+        if (address == null) {
+            return "";
+        }
+        List<PoiItem> pois = address.getPois();
+        if (pois != null && !pois.isEmpty()) {
+            String title = cleanText(pois.get(0).getTitle());
+            if (!title.isEmpty()) {
+                return title;
+            }
+        }
+        return cleanText(address.getFormatAddress());
+    }
+
+    private String cleanText(String value) {
+        return value == null ? "" : value.trim().replaceAll("\\s+", " ");
+    }
+
+    private String checkinTitle(TrackStore.CheckinRecord checkin) {
+        if (checkin == null) {
+            return "打卡";
+        }
+        if (hasText(checkin.address)) {
+            return checkin.address;
+        }
+        if (hasText(checkin.note)) {
+            return checkin.note;
+        }
+        return "打卡";
+    }
+
+    private boolean hasText(String value) {
+        return value != null && !value.trim().isEmpty();
     }
 
     private void openImagePicker() {
@@ -1454,7 +1712,7 @@ public final class MainActivity extends Activity {
             return;
         }
         String note = activeNoteInput == null ? "" : activeNoteInput.getText().toString().trim();
-        TrackStore.addCheckin(this, TrackStore.today(), pendingCheckinLocation, note, pendingPhotoPaths);
+        TrackStore.addCheckin(this, TrackStore.today(), pendingCheckinLocation, note, pendingCheckinAddress, pendingPhotoPaths);
         if (activeCheckinDialog != null) {
             activeCheckinDialog.dismiss();
         }
@@ -1501,6 +1759,7 @@ public final class MainActivity extends Activity {
         }
         if (selectedTab == TAB_SETTINGS) {
             refreshCloudUi();
+            refreshCommonAddressUi();
         }
     }
 
@@ -1529,6 +1788,12 @@ public final class MainActivity extends Activity {
 
         TextView time = text(TrackStore.formatClock(checkin.timestamp), 13, color("#6F756D"), Typeface.BOLD);
         card.addView(time);
+
+        if (hasText(checkin.address)) {
+            TextView address = text(checkin.address, 14, color("#1F6F54"), Typeface.BOLD);
+            address.setPadding(0, dp(6), 0, 0);
+            card.addView(address);
+        }
 
         String note = checkin.note == null || checkin.note.isEmpty() ? "没有文字备注" : checkin.note;
         TextView noteView = text(note, 15, color("#25302B"), Typeface.NORMAL);

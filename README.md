@@ -1,36 +1,58 @@
-# 轨迹日记小程序
+# MotionTrace 轨迹日记
 
-一个原生微信小程序 MVP，用于记录日常运动轨迹、按天归档，并支持在路线上的某个地点保存照片打卡。
+MotionTrace 是一个原生 Android 轨迹记录 App，用于记录日常出行、运动路线和沿途打卡。当前仓库只保留 Android App、Cloudflare Worker 云同步服务和部署文档。
+
+## 项目结构
+
+```text
+android-app/           Android 原生 App
+cloudflare-worker/     Cloudflare Workers + D1 云同步服务
+docs/cloud-sync.md     云同步方案说明
+.github/workflows/     Cloudflare Worker 自动部署流程
+```
 
 ## 已实现
 
-- 今日页：前台定位记录、地图轨迹线、距离/时长/轨迹点/打卡统计。
-- 打卡：当前位置、最多 3 张照片、本地保存、文字备注。
-- 历史页：按天展示轨迹摘要。
-- 详情页：查看某一天的完整轨迹和打卡时间线。
-- 设置页：说明定位与本地数据，并支持清空本地记录。
-- 文档：`docs/requirements.md` 和 `docs/ui-interaction.md`。
+- Android 前台服务持续定位，退到后台或锁屏后继续记录轨迹。
+- 按速度动态调整采样频率，快速移动最高约 1 秒一次，慢速约 10 秒一次。
+- 今日、历史、我的三个底部 Tab。
+- 今日页展示高德地图、今日轨迹、行程数量、距离、时长和打卡列表。
+- 历史页按天归档，点击日期卡片可展开轨迹地图、轨迹点和打卡点。
+- 沿途打卡支持获取地名、备注、拍照和多选已有照片。
+- 我的页汇总展示本机常用打卡地址。
+- 本机 JSON 存储轨迹、行程、打卡和照片路径。
+- 可选云同步：注册、登录、修改密码、上传本机数据、从云端恢复。
+- Cloudflare Worker 提供账号 API、轨迹快照同步、提交记录管理后台。
 
-## 运行方式
+## Android 运行
 
-1. 打开微信开发者工具。
-2. 选择「导入项目」。
-3. 项目目录选择当前文件夹。
-4. AppID 可先使用测试号，或在 `project.config.json` 中替换为自己的小程序 AppID。
-5. 在真机或模拟器中授权定位后测试记录轨迹。
+1. 用 Android Studio 打开 `android-app` 目录。
+2. 使用 Android Studio 自带 JDK 17。
+3. 安装 Android SDK Platform 36。
+4. 复制 `android-app/gradle.properties.example` 为 `android-app/gradle.properties`。
+5. 填写 `AMAP_KEY`，如需云同步再填写 `CLOUD_WORKER_URL`。
+6. 连接真机或启动模拟器，点击 Run。
+
+更多 Android 构建和权限说明见 `android-app/README.md`。
+
+## 云同步部署
+
+云同步服务位于 `cloudflare-worker/`，使用 Cloudflare Workers + D1 SQLite。GitHub Actions 已配置自动部署流程，推送到 `main` 后会自动执行 Worker 部署。
+
+首次部署需要在 GitHub 仓库配置这些 Repository secrets：
+
+```text
+CLOUDFLARE_API_TOKEN
+CLOUDFLARE_ACCOUNT_ID
+CLOUDFLARE_D1_DATABASE_ID
+CLOUDFLARE_ADMIN_TOKEN
+```
+
+详细部署步骤见 `cloudflare-worker/README.md` 和 `docs/cloud-sync.md`。
 
 ## 数据说明
 
-当前版本使用 `wx.setStorageSync` 保存在本机：
-
-- 存储键：`motion_tracks_v1`
-- 轨迹点包含经纬度、精度、速度和时间戳。
-- 打卡包含经纬度、照片本地路径、备注和时间戳。
-
-## 后续建议
-
-- 接入云开发，实现跨设备同步。
-- 增加后台定位能力，需要单独申请和声明权限。
-- 增加 GPX/KML 导出。
-- 增加路线分享图和月度统计。
-- 增加运动类型、自动暂停和轨迹纠偏。
+- 默认数据保存在 Android 本机私有目录。
+- 云同步当前上传轨迹、行程、打卡坐标、地名和文字信息。
+- 打卡照片原图暂不上传，仍保存在手机本机。
+- 后续如需多设备同步照片，建议接入 Cloudflare R2。

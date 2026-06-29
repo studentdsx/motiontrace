@@ -14,7 +14,6 @@ import java.nio.charset.StandardCharsets;
 
 final class CloudSyncClient {
     private static final String PREFS = "cloud_sync";
-    private static final String KEY_BASE_URL = "base_url";
     private static final String KEY_TOKEN = "token";
     private static final String KEY_EMAIL = "email";
 
@@ -25,23 +24,22 @@ final class CloudSyncClient {
     }
 
     String getBaseUrl() {
-        return prefs().getString(KEY_BASE_URL, "");
+        return normalizeBaseUrl(BuildConfig.CLOUD_WORKER_URL);
     }
 
     String getEmail() {
         return prefs().getString(KEY_EMAIL, "");
     }
 
+    boolean isConfigured() {
+        return !getBaseUrl().isEmpty();
+    }
+
     boolean isLoggedIn() {
         return !getToken().isEmpty();
     }
 
-    void saveBaseUrl(String baseUrl) {
-        prefs().edit().putString(KEY_BASE_URL, normalizeBaseUrl(baseUrl)).apply();
-    }
-
-    String register(String baseUrl, String email, String password) throws Exception {
-        saveBaseUrl(baseUrl);
+    String register(String email, String password) throws Exception {
         JSONObject request = new JSONObject();
         request.put("email", email);
         request.put("password", password);
@@ -50,14 +48,20 @@ final class CloudSyncClient {
         return response.optString("token", "");
     }
 
-    String login(String baseUrl, String email, String password) throws Exception {
-        saveBaseUrl(baseUrl);
+    String login(String email, String password) throws Exception {
         JSONObject request = new JSONObject();
         request.put("email", email);
         request.put("password", password);
         JSONObject response = post("/auth/login", request, "");
         saveSession(email, response.optString("token", ""));
         return response.optString("token", "");
+    }
+
+    JSONObject changePassword(String currentPassword, String newPassword) throws Exception {
+        JSONObject request = new JSONObject();
+        request.put("currentPassword", currentPassword);
+        request.put("newPassword", newPassword);
+        return post("/auth/change-password", request, getToken());
     }
 
     JSONObject upload(String payload) throws Exception {
@@ -108,7 +112,7 @@ final class CloudSyncClient {
     private HttpURLConnection open(String path, String method, String token) throws Exception {
         String baseUrl = getBaseUrl();
         if (baseUrl.isEmpty()) {
-            throw new IllegalStateException("请先填写云同步地址");
+            throw new IllegalStateException("云同步服务未配置");
         }
         URL url = new URL(baseUrl + path);
         HttpURLConnection connection = (HttpURLConnection) url.openConnection();
@@ -130,9 +134,39 @@ final class CloudSyncClient {
                 : connection.getErrorStream();
         String text = readAll(input);
         if (code < 200 || code >= 300) {
-            throw new IllegalStateException("云端请求失败：" + code + " " + text);
+            throw new IllegalStateException(toUserMessage(code, text));
         }
         return text.isEmpty() ? new JSONObject() : new JSONObject(text);
+    }
+
+    private String toUserMessage(int code, String text) {
+        String error = "";
+        try {
+            error = text == null || text.isEmpty() ? "" : new JSONObject(text).optString("error", "");
+        } catch (Exception ignored) {
+        }
+        if ("email_exists".equals(error)) {
+            return "邮箱已注册";
+        }
+        if ("invalid_credentials".equals(error)) {
+            return code == 400 ? "邮箱格式或密码不符合要求" : "邮箱或密码不正确";
+        }
+        if ("invalid_password".equals(error)) {
+            return "新密码至少 8 位，且不超过 128 位";
+        }
+        if ("password_unchanged".equals(error)) {
+            return "新密码不能和旧密码相同";
+        }
+        if ("unauthorized".equals(error)) {
+            return "请先登录";
+        }
+        if ("payload_too_large".equals(error)) {
+            return "云端数据包过大";
+        }
+        if ("server_error".equals(error)) {
+            return "云端服务异常";
+        }
+        return "云端请求失败：" + code;
     }
 
     private String readAll(InputStream input) throws Exception {
