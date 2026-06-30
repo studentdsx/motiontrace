@@ -115,6 +115,15 @@ public final class MainActivity extends Activity {
     private EditText cloudEmailInput;
     private EditText cloudPasswordInput;
     private EditText cloudNewPasswordInput;
+    private Button cloudRegisterButton;
+    private Button cloudLoginButton;
+    private Button cloudChangePasswordButton;
+    private Button cloudUploadButton;
+    private Button cloudDownloadButton;
+    private Button cloudLogoutButton;
+    private boolean cloudTaskRunning;
+    private String cloudNotice = "";
+    private long cloudNoticeUntilMs;
     private Button recordButton;
     private Button backgroundButton;
     private LinearLayout checkinList;
@@ -533,26 +542,26 @@ public final class MainActivity extends Activity {
         authParams.setMargins(0, dp(10), 0, 0);
         card.addView(authRow, authParams);
 
-        Button registerButton = button("注册", false);
-        registerButton.setOnClickListener(new View.OnClickListener() {
+        cloudRegisterButton = button("注册", false);
+        cloudRegisterButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
                 registerCloudAccount();
             }
         });
-        authRow.addView(registerButton, weightedButtonParams(1f, 0, dp(5)));
+        authRow.addView(cloudRegisterButton, weightedButtonParams(1f, 0, dp(5)));
 
-        Button loginButton = button("登录", true);
-        loginButton.setOnClickListener(new View.OnClickListener() {
+        cloudLoginButton = button("登录", true);
+        cloudLoginButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
                 loginCloudAccount();
             }
         });
-        authRow.addView(loginButton, weightedButtonParams(1f, dp(5), 0));
+        authRow.addView(cloudLoginButton, weightedButtonParams(1f, dp(5), 0));
 
-        Button changePasswordButton = button("修改密码", false);
-        changePasswordButton.setOnClickListener(new View.OnClickListener() {
+        cloudChangePasswordButton = button("修改密码", false);
+        cloudChangePasswordButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
                 changeCloudPassword();
@@ -560,7 +569,7 @@ public final class MainActivity extends Activity {
         });
         LinearLayout.LayoutParams passwordParams = matchWrap();
         passwordParams.setMargins(0, dp(10), 0, 0);
-        card.addView(changePasswordButton, passwordParams);
+        card.addView(cloudChangePasswordButton, passwordParams);
 
         LinearLayout syncRow = new LinearLayout(this);
         syncRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -568,26 +577,26 @@ public final class MainActivity extends Activity {
         syncParams.setMargins(0, dp(10), 0, 0);
         card.addView(syncRow, syncParams);
 
-        Button uploadButton = button("上传本机数据", false);
-        uploadButton.setOnClickListener(new View.OnClickListener() {
+        cloudUploadButton = button("上传本机数据", false);
+        cloudUploadButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
                 uploadCloudSnapshot();
             }
         });
-        syncRow.addView(uploadButton, weightedButtonParams(1f, 0, dp(5)));
+        syncRow.addView(cloudUploadButton, weightedButtonParams(1f, 0, dp(5)));
 
-        Button downloadButton = button("从云端恢复", false);
-        downloadButton.setOnClickListener(new View.OnClickListener() {
+        cloudDownloadButton = button("从云端恢复", false);
+        cloudDownloadButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
                 confirmDownloadCloudSnapshot();
             }
         });
-        syncRow.addView(downloadButton, weightedButtonParams(1f, dp(5), 0));
+        syncRow.addView(cloudDownloadButton, weightedButtonParams(1f, dp(5), 0));
 
-        Button logoutButton = button("退出登录", false);
-        logoutButton.setOnClickListener(new View.OnClickListener() {
+        cloudLogoutButton = button("退出登录", false);
+        cloudLogoutButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
                 new CloudSyncClient(MainActivity.this).logout();
@@ -597,7 +606,7 @@ public final class MainActivity extends Activity {
         });
         LinearLayout.LayoutParams logoutParams = matchWrap();
         logoutParams.setMargins(0, dp(10), 0, 0);
-        card.addView(logoutButton, logoutParams);
+        card.addView(cloudLogoutButton, logoutParams);
 
         refreshCloudUi();
         return card;
@@ -1248,6 +1257,9 @@ public final class MainActivity extends Activity {
     private void registerCloudAccount() {
         final String email = inputValue(cloudEmailInput);
         final String password = inputValue(cloudPasswordInput);
+        if (!ensureCloudConfigured() || !validateCloudCredentials(email, password, true)) {
+            return;
+        }
         runCloudTask("正在注册", new CloudTask() {
             @Override
             public String run() throws Exception {
@@ -1260,6 +1272,9 @@ public final class MainActivity extends Activity {
     private void loginCloudAccount() {
         final String email = inputValue(cloudEmailInput);
         final String password = inputValue(cloudPasswordInput);
+        if (!ensureCloudConfigured() || !validateCloudCredentials(email, password, false)) {
+            return;
+        }
         runCloudTask("正在登录", new CloudTask() {
             @Override
             public String run() throws Exception {
@@ -1272,6 +1287,19 @@ public final class MainActivity extends Activity {
     private void changeCloudPassword() {
         final String currentPassword = inputValue(cloudPasswordInput);
         final String newPassword = inputValue(cloudNewPasswordInput);
+        if (!ensureCloudConfigured()) {
+            return;
+        }
+        if (currentPassword.isEmpty()) {
+            showCloudNotice("请先输入当前密码", 6000L);
+            toast("请先输入当前密码");
+            return;
+        }
+        if (newPassword.length() < 8) {
+            showCloudNotice("新密码至少 8 位", 6000L);
+            toast("新密码至少 8 位");
+            return;
+        }
         runCloudTask("正在修改密码", new CloudTask() {
             @Override
             public String run() throws Exception {
@@ -1286,6 +1314,9 @@ public final class MainActivity extends Activity {
     }
 
     private void uploadCloudSnapshot() {
+        if (!ensureCloudConfigured()) {
+            return;
+        }
         runCloudTask("正在上传", new CloudTask() {
             @Override
             public String run() throws Exception {
@@ -1314,6 +1345,9 @@ public final class MainActivity extends Activity {
     }
 
     private void downloadCloudSnapshot() {
+        if (!ensureCloudConfigured()) {
+            return;
+        }
         runCloudTask("正在恢复", new CloudTask() {
             @Override
             public String run() throws Exception {
@@ -1328,6 +1362,13 @@ public final class MainActivity extends Activity {
     }
 
     private void runCloudTask(String startMessage, final CloudTask task) {
+        if (cloudTaskRunning) {
+            showCloudNotice("云同步任务进行中，请稍等", 5000L);
+            toast("云同步任务进行中");
+            return;
+        }
+        Log.i(TAG, "cloud task start: " + startMessage);
+        setCloudBusy(true, startMessage + "...");
         toast(startMessage);
         new Thread(new Runnable() {
             @Override
@@ -1337,6 +1378,7 @@ public final class MainActivity extends Activity {
                     handler.post(new Runnable() {
                         @Override
                         public void run() {
+                            setCloudBusy(false, null);
                             refreshCloudUi();
                             refreshUi();
                             if ("注册并登录成功".equals(message)
@@ -1344,19 +1386,107 @@ public final class MainActivity extends Activity {
                                     || "密码已修改".equals(message)) {
                                 clearCloudPasswordInputs();
                             }
+                            showCloudNotice(message, 6000L);
                             toast(message);
                         }
                     });
                 } catch (final Exception error) {
+                    Log.w(TAG, "cloud task failed: " + startMessage, error);
                     handler.post(new Runnable() {
                         @Override
                         public void run() {
-                            toast(error.getMessage() == null ? "云同步失败" : error.getMessage());
+                            setCloudBusy(false, null);
+                            refreshCloudUi();
+                            String message = cloudErrorMessage(error);
+                            showCloudNotice(message, 10000L);
+                            toast(message);
                         }
                     });
                 }
             }
         }).start();
+    }
+
+    private boolean ensureCloudConfigured() {
+        if (new CloudSyncClient(this).isConfigured()) {
+            return true;
+        }
+        showCloudNotice("云同步服务未配置，无法注册或登录", 8000L);
+        toast("云同步服务未配置");
+        return false;
+    }
+
+    private boolean validateCloudCredentials(String email, String password, boolean requireNewPassword) {
+        if (email.isEmpty()) {
+            showCloudNotice("请先输入邮箱", 6000L);
+            toast("请先输入邮箱");
+            return false;
+        }
+        if (!email.contains("@")) {
+            showCloudNotice("邮箱格式不正确", 6000L);
+            toast("邮箱格式不正确");
+            return false;
+        }
+        if (password.isEmpty()) {
+            showCloudNotice("请先输入密码", 6000L);
+            toast("请先输入密码");
+            return false;
+        }
+        if (requireNewPassword && password.length() < 8) {
+            showCloudNotice("密码至少 8 位", 6000L);
+            toast("密码至少 8 位");
+            return false;
+        }
+        return true;
+    }
+
+    private String cloudErrorMessage(Exception error) {
+        String message = error.getMessage();
+        if (message == null || message.trim().isEmpty()) {
+            return "云同步失败，请检查网络或服务端配置";
+        }
+        return message;
+    }
+
+    private void setCloudBusy(boolean busy, String status) {
+        cloudTaskRunning = busy;
+        if (busy) {
+            cloudNotice = "";
+            cloudNoticeUntilMs = 0L;
+        }
+        setCloudButtonsEnabled(!busy);
+        if (status != null) {
+            setCloudStatus(status);
+        }
+    }
+
+    private void showCloudNotice(String message, long durationMs) {
+        cloudNotice = message == null ? "" : message;
+        cloudNoticeUntilMs = cloudNotice.isEmpty() ? 0L : System.currentTimeMillis() + durationMs;
+        setCloudStatus(cloudNotice);
+    }
+
+    private void setCloudStatus(String message) {
+        if (cloudStatusText != null) {
+            cloudStatusText.setText(message == null ? "" : message);
+        }
+    }
+
+    private void setCloudButtonsEnabled(boolean enabled) {
+        setCloudButtonEnabled(cloudRegisterButton, enabled);
+        setCloudButtonEnabled(cloudLoginButton, enabled);
+        setCloudButtonEnabled(cloudChangePasswordButton, enabled);
+        setCloudButtonEnabled(cloudUploadButton, enabled);
+        setCloudButtonEnabled(cloudDownloadButton, enabled);
+        setCloudButtonEnabled(cloudLogoutButton, enabled);
+    }
+
+    private void setCloudButtonEnabled(Button button, boolean enabled) {
+        if (button == null) {
+            return;
+        }
+        button.setEnabled(enabled);
+        button.setAlpha(enabled ? 1f : 0.45f);
     }
 
     private void clearCloudPasswordInputs() {
@@ -1372,13 +1502,32 @@ public final class MainActivity extends Activity {
         if (cloudStatusText == null) {
             return;
         }
+        if (cloudTaskRunning) {
+            return;
+        }
         CloudSyncClient client = new CloudSyncClient(this);
+        boolean configured = client.isConfigured();
+        boolean loggedIn = client.isLoggedIn();
+        setCloudButtonEnabled(cloudRegisterButton, configured);
+        setCloudButtonEnabled(cloudLoginButton, configured);
+        setCloudButtonEnabled(cloudChangePasswordButton, configured && loggedIn);
+        setCloudButtonEnabled(cloudUploadButton, configured && loggedIn);
+        setCloudButtonEnabled(cloudDownloadButton, configured && loggedIn);
+        setCloudButtonEnabled(cloudLogoutButton, configured && loggedIn);
         if (cloudEmailInput != null && cloudEmailInput.getText().length() == 0) {
             cloudEmailInput.setText(client.getEmail());
         }
-        if (!client.isConfigured()) {
+        if (!cloudNotice.isEmpty()) {
+            if (System.currentTimeMillis() < cloudNoticeUntilMs) {
+                setCloudStatus(cloudNotice);
+                return;
+            }
+            cloudNotice = "";
+            cloudNoticeUntilMs = 0L;
+        }
+        if (!configured) {
             cloudStatusText.setText("云同步服务未配置，当前只使用本机数据。");
-        } else if (client.isLoggedIn()) {
+        } else if (loggedIn) {
             cloudStatusText.setText("已登录：" + client.getEmail() + "。当前同步不上传照片原图。");
         } else {
             cloudStatusText.setText("未登录。可选云同步会上传轨迹、行程和打卡文字，照片仍保留本机。");

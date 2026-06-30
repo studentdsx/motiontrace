@@ -4,6 +4,8 @@ const PASSWORD_MIN_LENGTH = 8;
 const PASSWORD_PBKDF2_ITERATIONS = 120000;
 const DEFAULT_ADMIN_USERNAME = "admin";
 const DEFAULT_ADMIN_PASSWORD = "Admin@1357";
+const ADMIN_SESSION_COOKIE = "motiontrace_admin";
+const ADMIN_SESSION_TTL_MS = 1000 * 60 * 60 * 8;
 
 export default {
   async fetch(request, env) {
@@ -16,7 +18,22 @@ export default {
       if (request.method === "GET" && url.pathname === "/health") {
         return json({ ok: true });
       }
+      if (request.method === "GET" && (url.pathname === "/admin/login" || url.pathname === "/admin/login/")) {
+        if (await isAdminAuthenticated(request, env)) {
+          return redirect("/admin");
+        }
+        return html(adminLoginPage());
+      }
+      if (request.method === "POST" && url.pathname === "/admin/api/login") {
+        return adminLogin(request, env);
+      }
+      if (request.method === "POST" && url.pathname === "/admin/api/logout") {
+        return adminLogout();
+      }
       if (request.method === "GET" && (url.pathname === "/admin" || url.pathname === "/admin/")) {
+        if (!(await isAdminAuthenticated(request, env))) {
+          return redirect("/admin/login");
+        }
         return html(adminPage());
       }
       if (request.method === "GET" && url.pathname === "/admin/api/submissions") {
@@ -183,9 +200,8 @@ async function downloadSnapshot(request, env) {
 }
 
 async function listSubmissions(request, env) {
-  const authError = requireAdmin(request, env);
-  if (authError) {
-    return authError;
+  if (!(await isAdminAuthenticated(request, env))) {
+    return json({ error: "unauthorized" }, 401);
   }
 
   const url = new URL(request.url);
@@ -221,34 +237,88 @@ async function listSubmissions(request, env) {
   });
 }
 
-function requireAdmin(request, env) {
-  const credentials = parseAdminCredentials(request.headers.get("Authorization") || "");
+async function adminLogin(request, env) {
+  const body = await readJson(request);
+  const username = String(body.username || "");
+  const password = String(body.password || "");
   const expectedUsername = String(env.ADMIN_USERNAME || DEFAULT_ADMIN_USERNAME);
   const expectedPassword = String(env.ADMIN_PASSWORD || DEFAULT_ADMIN_PASSWORD);
-  if (!credentials || credentials.username !== expectedUsername || credentials.password !== expectedPassword) {
+
+  if (username !== expectedUsername || password !== expectedPassword) {
     return json({ error: "unauthorized" }, 401);
   }
-  return null;
+
+  const expiresAt = Date.now() + ADMIN_SESSION_TTL_MS;
+  const value = await signAdminSession(username, expiresAt, env);
+  const response = json({ ok: true });
+  response.headers.set("Set-Cookie", adminCookie(value, Math.floor(ADMIN_SESSION_TTL_MS / 1000)));
+  return response;
 }
 
-function parseAdminCredentials(header) {
-  const match = header.match(/^Basic\s+(.+)$/i);
-  if (!match) {
+function adminLogout() {
+  const response = json({ ok: true });
+  response.headers.set("Set-Cookie", adminCookie("", 0));
+  return response;
+}
+
+async function isAdminAuthenticated(request, env) {
+  const cookie = parseCookies(request.headers.get("Cookie") || "")[ADMIN_SESSION_COOKIE];
+  if (!cookie) {
+    return false;
+  }
+  const session = await verifyAdminSession(cookie, env);
+  const expectedUsername = String(env.ADMIN_USERNAME || DEFAULT_ADMIN_USERNAME);
+  return Boolean(session && session.username === expectedUsername);
+}
+
+async function signAdminSession(username, expiresAt, env) {
+  const payload = base64UrlEncode(JSON.stringify({ username, expiresAt }));
+  const signature = await hmac(payload, adminSessionSecret(env));
+  return payload + "." + signature;
+}
+
+async function verifyAdminSession(value, env) {
+  const parts = String(value || "").split(".");
+  if (parts.length !== 2) {
+    return null;
+  }
+  const expectedSignature = await hmac(parts[0], adminSessionSecret(env));
+  if (parts[1] !== expectedSignature) {
     return null;
   }
   try {
-    const decoded = atob(match[1]);
-    const separator = decoded.indexOf(":");
-    if (separator < 0) {
+    const payload = JSON.parse(base64UrlDecode(parts[0]));
+    if (!payload || Number(payload.expiresAt || 0) < Date.now()) {
       return null;
     }
-    return {
-      username: decoded.slice(0, separator),
-      password: decoded.slice(separator + 1)
-    };
+    return payload;
   } catch (error) {
     return null;
   }
+}
+
+function adminSessionSecret(env) {
+  return String(env.ADMIN_SESSION_SECRET || env.ADMIN_PASSWORD || DEFAULT_ADMIN_PASSWORD);
+}
+
+function parseCookies(header) {
+  const cookies = {};
+  for (const part of header.split(";")) {
+    const separator = part.indexOf("=");
+    if (separator < 0) {
+      continue;
+    }
+    const key = part.slice(0, separator).trim();
+    const value = part.slice(separator + 1).trim();
+    if (key) {
+      cookies[key] = value;
+    }
+  }
+  return cookies;
+}
+
+function adminCookie(value, maxAge) {
+  return ADMIN_SESSION_COOKIE + "=" + value + "; Max-Age=" + maxAge + "; Path=/admin; HttpOnly; Secure; SameSite=Lax";
 }
 
 async function createSession(env, userId) {
@@ -362,6 +432,34 @@ function base64Url(bytes) {
   return btoa(value).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }
 
+function base64UrlEncode(value) {
+  const bytes = new TextEncoder().encode(value);
+  return base64Url(bytes);
+}
+
+function base64UrlDecode(value) {
+  const normalized = String(value || "").replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized + "=".repeat((4 - normalized.length % 4) % 4);
+  const binary = atob(padded);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+async function hmac(value, secret) {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const signature = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(value));
+  return base64Url(new Uint8Array(signature));
+}
+
 function summarizeSnapshot(payload) {
   const summary = { days: 0, points: 0, checkins: 0, trips: 0 };
   try {
@@ -453,7 +551,7 @@ function adminPage() {
     .status.err { color: var(--red); border-color: #edc8c2; background: #fff6f4; }
     .toolbar {
       display: grid;
-      grid-template-columns: minmax(130px, 0.7fr) minmax(170px, 0.8fr) minmax(220px, 1.2fr) minmax(110px, 0.5fr) auto auto;
+      grid-template-columns: minmax(260px, 1fr) 120px auto auto auto;
       gap: 10px;
       align-items: center;
       padding: 12px;
@@ -564,12 +662,10 @@ function adminPage() {
         <h1>MotionTrace Admin</h1>
         <p class="sub">轨迹同步提交记录</p>
       </div>
-      <div id="status" class="status">未连接</div>
+      <div id="status" class="status">已登录</div>
     </header>
 
     <section class="toolbar" aria-label="查询条件">
-      <input id="username" type="text" autocomplete="username" placeholder="管理员账号">
-      <input id="password" type="password" autocomplete="current-password" placeholder="管理员密码">
       <input id="email" type="search" placeholder="按邮箱过滤">
       <select id="limit" aria-label="加载条数">
         <option value="50">50 条</option>
@@ -578,6 +674,7 @@ function adminPage() {
       </select>
       <button id="load">查询</button>
       <button id="clear" class="secondary">清除</button>
+      <button id="logout" class="secondary">退出</button>
     </section>
 
     <section class="stats" aria-label="汇总">
@@ -602,59 +699,44 @@ function adminPage() {
           </tr>
         </thead>
         <tbody id="rows">
-          <tr><td colspan="8" class="empty">输入管理员账号密码后查询</td></tr>
+          <tr><td colspan="8" class="empty">正在加载提交记录</td></tr>
         </tbody>
       </table>
     </section>
   </main>
 
   <script>
-    var username = document.getElementById("username");
-    var password = document.getElementById("password");
     var email = document.getElementById("email");
     var limit = document.getElementById("limit");
     var rows = document.getElementById("rows");
     var statusBox = document.getElementById("status");
-    username.value = localStorage.getItem("motiontrace_admin_username") || "admin";
 
     document.getElementById("load").addEventListener("click", load);
     document.getElementById("clear").addEventListener("click", function () {
-      localStorage.removeItem("motiontrace_admin_username");
-      username.value = "admin";
-      password.value = "";
       email.value = "";
-      rows.innerHTML = '<tr><td colspan="8" class="empty">输入管理员账号密码后查询</td></tr>';
-      setStatus("未连接", "");
+      rows.innerHTML = '<tr><td colspan="8" class="empty">点击查询加载提交记录</td></tr>';
+      setStatus("已登录", "");
       renderMetrics([]);
     });
-    username.addEventListener("keydown", function (event) {
-      if (event.key === "Enter") load();
-    });
-    password.addEventListener("keydown", function (event) {
-      if (event.key === "Enter") load();
-    });
+    document.getElementById("logout").addEventListener("click", logout);
     email.addEventListener("keydown", function (event) {
       if (event.key === "Enter") load();
     });
+    load();
 
     async function load() {
-      var adminUsername = username.value.trim();
-      var adminPassword = password.value;
-      if (!adminUsername || !adminPassword) {
-        setStatus("请输入账号密码", "err");
-        return;
-      }
-      localStorage.setItem("motiontrace_admin_username", adminUsername);
       setStatus("查询中", "");
       var params = new URLSearchParams();
       params.set("limit", limit.value);
       if (email.value.trim()) params.set("email", email.value.trim());
       try {
-        var response = await fetch("/admin/api/submissions?" + params.toString(), {
-          headers: { Authorization: "Basic " + btoa(adminUsername + ":" + adminPassword) }
-        });
+        var response = await fetch("/admin/api/submissions?" + params.toString(), { credentials: "same-origin" });
         var payload = await response.json().catch(function () { return {}; });
         if (!response.ok) {
+          if (response.status === 401) {
+            location.href = "/admin/login";
+            return;
+          }
           throw new Error(errorMessage(payload.error));
         }
         var items = payload.items || [];
@@ -666,6 +748,11 @@ function adminPage() {
         renderMetrics([]);
         setStatus("查询失败", "err");
       }
+    }
+
+    async function logout() {
+      await fetch("/admin/api/logout", { method: "POST", credentials: "same-origin" }).catch(function () {});
+      location.href = "/admin/login";
     }
 
     function renderRows(items) {
@@ -708,7 +795,7 @@ function adminPage() {
     }
 
     function errorMessage(code) {
-      if (code === "unauthorized") return "账号或密码不正确";
+      if (code === "unauthorized") return "登录已过期";
       return code || "查询失败";
     }
 
@@ -743,10 +830,159 @@ function adminPage() {
 </html>`;
 }
 
+function adminLoginPage() {
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MotionTrace Admin Login</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f6f3;
+      --surface: #ffffff;
+      --ink: #1d2622;
+      --muted: #66736b;
+      --line: #dce4dc;
+      --green: #1f6f54;
+      --red: #b94f44;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }
+    .panel {
+      width: min(420px, 100%);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      padding: 24px;
+    }
+    h1 {
+      margin: 0;
+      font-size: 26px;
+      line-height: 1.15;
+    }
+    .sub {
+      margin: 8px 0 22px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    label {
+      display: block;
+      margin: 14px 0 7px;
+      color: #405047;
+      font-size: 13px;
+      font-weight: 700;
+    }
+    input, button {
+      width: 100%;
+      height: 42px;
+      border-radius: 7px;
+      border: 1px solid var(--line);
+      font: inherit;
+      font-size: 14px;
+    }
+    input {
+      padding: 0 12px;
+      color: var(--ink);
+      background: #fbfcfb;
+      outline-color: #8db69f;
+    }
+    button {
+      margin-top: 18px;
+      border-color: transparent;
+      background: var(--green);
+      color: #fff;
+      cursor: pointer;
+    }
+    button:disabled {
+      opacity: 0.65;
+      cursor: default;
+    }
+    .error {
+      min-height: 20px;
+      margin-top: 12px;
+      color: var(--red);
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <main class="panel">
+    <h1>MotionTrace Admin</h1>
+    <p class="sub">登录后查看轨迹同步提交记录</p>
+    <form id="form">
+      <label for="username">管理员账号</label>
+      <input id="username" name="username" type="text" autocomplete="username" value="admin" required>
+      <label for="password">管理员密码</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
+      <button id="submit" type="submit">登录</button>
+      <div id="error" class="error"></div>
+    </form>
+  </main>
+  <script>
+    var form = document.getElementById("form");
+    var username = document.getElementById("username");
+    var password = document.getElementById("password");
+    var submit = document.getElementById("submit");
+    var error = document.getElementById("error");
+
+    form.addEventListener("submit", async function (event) {
+      event.preventDefault();
+      error.textContent = "";
+      submit.disabled = true;
+      submit.textContent = "登录中";
+      try {
+        var response = await fetch("/admin/api/login", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            username: username.value.trim(),
+            password: password.value
+          })
+        });
+        if (!response.ok) {
+          error.textContent = "账号或密码不正确";
+          return;
+        }
+        location.href = "/admin";
+      } catch (err) {
+        error.textContent = "登录失败，请稍后重试";
+      } finally {
+        submit.disabled = false;
+        submit.textContent = "登录";
+      }
+    });
+  </script>
+</body>
+</html>`;
+}
+
 function html(body) {
   return new Response(body, {
     headers: {
       "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store"
+    }
+  });
+}
+
+function redirect(location) {
+  return new Response(null, {
+    status: 302,
+    headers: {
+      Location: location,
       "Cache-Control": "no-store"
     }
   });
@@ -762,6 +998,6 @@ function json(body, status = 200) {
 function cors(response) {
   response.headers.set("Access-Control-Allow-Origin", "*");
   response.headers.set("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  response.headers.set("Access-Control-Allow-Headers", "Content-Type,Authorization");
+  response.headers.set("Access-Control-Allow-Headers", "Content-Type,Authorization,Cookie");
   return response;
 }

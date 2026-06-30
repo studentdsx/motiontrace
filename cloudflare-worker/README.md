@@ -38,7 +38,7 @@ wrangler deploy
 ```
 
 部署后的 Worker URL 填到 Android App 构建配置 `CLOUD_WORKER_URL`，不要让终端用户手动填写。
-管理后台访问 `https://motiontrace.631581.xyz/admin`，默认账号为 `admin`，默认密码为 `Admin@1357`。
+管理后台访问 `https://motiontrace.631581.xyz/admin`，未登录时会先进入登录页；默认账号为 `admin`，默认密码为 `Admin@1357`。
 `wrangler.toml.example` 已配置 `motiontrace.631581.xyz` 为 Worker 自定义域名；自动部署时会使用这个域名。
 
 ## GitHub Actions 自动化部署
@@ -110,6 +110,7 @@ https://motiontrace.631581.xyz/admin
 ```
 
 默认账号为 `admin`，默认密码为 `Admin@1357`。
+登录成功后进入管理页，可按邮箱过滤并查询提交记录。
 后台当前展示每次轨迹上传的提交时间、用户邮箱、上传体积、轨迹天数、轨迹点数、行程数和打卡数。
 
 ## 账号逻辑

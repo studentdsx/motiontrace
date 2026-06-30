@@ -15,3 +15,4 @@ database_id = "replace-with-your-d1-database-id"
 APP_NAME = "motiontrace"
 # 管理后台默认账号：admin，默认密码：Admin@1357。
 # 如需覆盖，可在 Cloudflare Worker 变量中设置 ADMIN_USERNAME / ADMIN_PASSWORD。
+# 如需单独设置后台登录 Cookie 签名密钥，可设置 ADMIN_SESSION_SECRET。

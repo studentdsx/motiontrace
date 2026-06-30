@@ -2,6 +2,7 @@ package com.motiontrace.diary;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.util.Log;
 
 import org.json.JSONObject;
 
@@ -13,6 +14,7 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 
 final class CloudSyncClient {
+    private static final String TAG = "MotionTrace";
     private static final String PREFS = "cloud_sync";
     private static final String KEY_TOKEN = "token";
     private static final String KEY_EMAIL = "email";
@@ -44,8 +46,12 @@ final class CloudSyncClient {
         request.put("email", email);
         request.put("password", password);
         JSONObject response = post("/auth/register", request, "");
-        saveSession(email, response.optString("token", ""));
-        return response.optString("token", "");
+        String token = response.optString("token", "");
+        if (token.isEmpty()) {
+            throw new IllegalStateException("云端登录返回异常");
+        }
+        saveSession(email, token);
+        return token;
     }
 
     String login(String email, String password) throws Exception {
@@ -53,8 +59,12 @@ final class CloudSyncClient {
         request.put("email", email);
         request.put("password", password);
         JSONObject response = post("/auth/login", request, "");
-        saveSession(email, response.optString("token", ""));
-        return response.optString("token", "");
+        String token = response.optString("token", "");
+        if (token.isEmpty()) {
+            throw new IllegalStateException("云端登录返回异常");
+        }
+        saveSession(email, token);
+        return token;
     }
 
     JSONObject changePassword(String currentPassword, String newPassword) throws Exception {
@@ -115,6 +125,7 @@ final class CloudSyncClient {
             throw new IllegalStateException("云同步服务未配置");
         }
         URL url = new URL(baseUrl + path);
+        Log.i(TAG, "cloud request: " + method + " " + url);
         HttpURLConnection connection = (HttpURLConnection) url.openConnection();
         connection.setRequestMethod(method);
         connection.setConnectTimeout(12000);
@@ -129,6 +140,7 @@ final class CloudSyncClient {
 
     private JSONObject readResponse(HttpURLConnection connection) throws Exception {
         int code = connection.getResponseCode();
+        Log.i(TAG, "cloud response: " + code + " " + connection.getURL().getPath());
         InputStream input = code >= 200 && code < 300
                 ? connection.getInputStream()
                 : connection.getErrorStream();

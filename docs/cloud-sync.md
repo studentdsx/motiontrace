@@ -12,7 +12,7 @@
 
 当前实现先同步整份本机轨迹 JSON 快照。照片原图暂不上传，仍保存在手机本机。原因是 D1 适合结构化数据，不适合存储大量图片；后续如果需要多设备照片同步，建议再接 Cloudflare R2。
 
-服务端同时提供 Web 管理后台，用于查询轨迹上传提交记录。后台默认账号为 `admin`，默认密码为 `Admin@1357`。
+服务端同时提供 Web 管理后台，用于查询轨迹上传提交记录。后台有独立登录页，默认账号为 `admin`，默认密码为 `Admin@1357`。
 
 ## 服务端
 
@@ -42,7 +42,7 @@ wrangler deploy
 ```
 
 把部署后的 Worker URL 写入 Android App 构建配置 `CLOUD_WORKER_URL`，由开发者配置，不让终端用户手动填写。
-管理后台访问 `https://motiontrace.631581.xyz/admin`，输入默认账号 `admin` 和默认密码 `Admin@1357` 后可查询提交记录。
+管理后台访问 `https://motiontrace.631581.xyz/admin`，未登录时会跳转登录页；输入默认账号 `admin` 和默认密码 `Admin@1357` 后可查询提交记录。
 
 ## Android 端
 
