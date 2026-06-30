@@ -19,6 +19,7 @@ final class CloudSyncClient {
     private static final String KEY_TOKEN = "token";
     private static final String KEY_USERNAME = "username";
     private static final String KEY_EMAIL = "email";
+    private static final String KEY_REALTIME_SYNC = "realtime_sync";
 
     private final Context context;
 
@@ -44,6 +45,14 @@ final class CloudSyncClient {
 
     boolean isLoggedIn() {
         return !getToken().isEmpty();
+    }
+
+    boolean isRealtimeSyncEnabled() {
+        return prefs().getBoolean(KEY_REALTIME_SYNC, false);
+    }
+
+    void setRealtimeSyncEnabled(boolean enabled) {
+        prefs().edit().putBoolean(KEY_REALTIME_SYNC, enabled).apply();
     }
 
     String register(String username, String password, String email) throws Exception {
@@ -86,6 +95,42 @@ final class CloudSyncClient {
         return post("/sync/upload", request, getToken());
     }
 
+    void uploadRealtimePoint(RealtimeTrackPoint point) throws Exception {
+        if (point == null) {
+            return;
+        }
+        JSONObject request = new JSONObject();
+        request.put("date", point.date);
+        request.put("tripId", point.tripId);
+        request.put("tripIndex", point.tripIndex);
+        request.put("pointIndex", point.pointIndex);
+        request.put("timestamp", point.timestamp);
+        request.put("longitude", point.longitude);
+        request.put("latitude", point.latitude);
+        request.put("accuracy", point.accuracy);
+        request.put("speed", point.speed);
+        post("/sync/track-point", request, getToken());
+    }
+
+    RealtimeTrackPoint buildRealtimePoint(TrackStore.DayRecord day, TrackStore.PointRecord point) {
+        if (day == null || point == null || point.timestamp <= 0L) {
+            return null;
+        }
+        int pointIndex = resolvePointIndex(day, point);
+        int tripIndex = resolveTripIndex(day, point);
+        return new RealtimeTrackPoint(
+                day.date == null ? "" : day.date,
+                point.tripId == null ? "" : point.tripId,
+                tripIndex,
+                pointIndex,
+                point.timestamp,
+                point.longitude,
+                point.latitude,
+                point.accuracy,
+                point.speed
+        );
+    }
+
     String download() throws Exception {
         JSONObject response = get("/sync/download", getToken());
         return response.optString("payload", "{}");
@@ -96,6 +141,7 @@ final class CloudSyncClient {
                 .remove(KEY_TOKEN)
                 .remove(KEY_USERNAME)
                 .remove(KEY_EMAIL)
+                .remove(KEY_REALTIME_SYNC)
                 .apply();
     }
 
@@ -195,10 +241,54 @@ final class CloudSyncClient {
         if ("payload_too_large".equals(error)) {
             return "云端数据包过大";
         }
+        if ("invalid_track_point".equals(error)) {
+            return "实时轨迹点异常";
+        }
         if ("server_error".equals(error)) {
             return "云端服务异常";
         }
         return "云端请求失败：" + code;
+    }
+
+    private int resolvePointIndex(TrackStore.DayRecord day, TrackStore.PointRecord point) {
+        for (int i = 0; i < day.points.size(); i++) {
+            TrackStore.PointRecord candidate = day.points.get(i);
+            if (candidate == point || samePoint(candidate, point)) {
+                return i;
+            }
+        }
+        return Math.max(0, day.points.size() - 1);
+    }
+
+    private boolean samePoint(TrackStore.PointRecord a, TrackStore.PointRecord b) {
+        return a != null
+                && b != null
+                && a.timestamp == b.timestamp
+                && Double.compare(a.latitude, b.latitude) == 0
+                && Double.compare(a.longitude, b.longitude) == 0;
+    }
+
+    private int resolveTripIndex(TrackStore.DayRecord day, TrackStore.PointRecord point) {
+        String tripId = point.tripId == null ? "" : point.tripId;
+        if (!tripId.isEmpty()) {
+            for (int i = 0; i < day.trips.size(); i++) {
+                TrackStore.TripRecord trip = day.trips.get(i);
+                if (trip != null && tripId.equals(trip.id)) {
+                    return i + 1;
+                }
+            }
+        }
+        for (int i = 0; i < day.trips.size(); i++) {
+            TrackStore.TripRecord trip = day.trips.get(i);
+            if (trip == null || trip.startTime <= 0L) {
+                continue;
+            }
+            long end = trip.endTime > 0L ? trip.endTime : Long.MAX_VALUE;
+            if (point.timestamp >= trip.startTime && point.timestamp <= end) {
+                return i + 1;
+            }
+        }
+        return 0;
     }
 
     private String readAll(InputStream input) throws Exception {
@@ -225,5 +315,39 @@ final class CloudSyncClient {
 
     private SharedPreferences prefs() {
         return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+    }
+
+    static final class RealtimeTrackPoint {
+        final String date;
+        final String tripId;
+        final int tripIndex;
+        final int pointIndex;
+        final long timestamp;
+        final double longitude;
+        final double latitude;
+        final double accuracy;
+        final double speed;
+
+        RealtimeTrackPoint(
+                String date,
+                String tripId,
+                int tripIndex,
+                int pointIndex,
+                long timestamp,
+                double longitude,
+                double latitude,
+                double accuracy,
+                double speed
+        ) {
+            this.date = date;
+            this.tripId = tripId;
+            this.tripIndex = tripIndex;
+            this.pointIndex = pointIndex;
+            this.timestamp = timestamp;
+            this.longitude = longitude;
+            this.latitude = latitude;
+            this.accuracy = accuracy;
+            this.speed = speed;
+        }
     }
 }

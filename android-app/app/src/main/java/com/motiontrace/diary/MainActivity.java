@@ -119,6 +119,7 @@ public final class MainActivity extends Activity {
     private Button cloudRegisterButton;
     private Button cloudLoginButton;
     private Button cloudChangePasswordButton;
+    private Button cloudRealtimeButton;
     private Button cloudUploadButton;
     private Button cloudDownloadButton;
     private Button cloudLogoutButton;
@@ -131,6 +132,7 @@ public final class MainActivity extends Activity {
     private LinearLayout checkinList;
     private HorizontalScrollView checkinTimelineScroller;
     private int checkinTimelineScrollX;
+    private String checkinRenderSignature = "";
     private LinearLayout historyList;
     private ScrollView todayPage;
     private ScrollView historyPage;
@@ -140,6 +142,10 @@ public final class MainActivity extends Activity {
     private int selectedTab = TAB_TODAY;
     private TextureMapView mapView;
     private AMap aMap;
+    private String mainMapFocusKey = "";
+    private boolean mainMapUserMoved;
+    private boolean mainMapProgrammaticMove;
+    private String selectedTodayTripId = "";
     private TextureMapView historyMapView;
     private AMap historyAMap;
     private String selectedHistoryDate;
@@ -592,6 +598,17 @@ public final class MainActivity extends Activity {
         });
         cloudAccountActions.addView(cloudChangePasswordButton, matchWrap());
 
+        cloudRealtimeButton = button("实时同步：关", false);
+        cloudRealtimeButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                toggleRealtimeCloudSync();
+            }
+        });
+        LinearLayout.LayoutParams realtimeParams = matchWrap();
+        realtimeParams.setMargins(0, dp(10), 0, 0);
+        cloudAccountActions.addView(cloudRealtimeButton, realtimeParams);
+
         LinearLayout syncRow = new LinearLayout(this);
         syncRow.setOrientation(LinearLayout.HORIZONTAL);
         LinearLayout.LayoutParams syncParams = matchWrap();
@@ -769,8 +786,8 @@ public final class MainActivity extends Activity {
         row1.setOrientation(LinearLayout.HORIZONTAL);
         grid.addView(row1, matchWrap());
 
-        distanceText = addStat(row1, "总距离", 0, dp(5));
-        durationText = addStat(row1, "总时长", dp(5), 0);
+        tripsText = addStat(row1, "今日行程", 0, dp(5));
+        checkinsText = addStat(row1, "打卡", dp(5), 0);
 
         LinearLayout row2 = new LinearLayout(this);
         row2.setOrientation(LinearLayout.HORIZONTAL);
@@ -778,8 +795,8 @@ public final class MainActivity extends Activity {
         row2Params.setMargins(0, dp(10), 0, 0);
         grid.addView(row2, row2Params);
 
-        tripsText = addStat(row2, "今日行程", 0, dp(5));
-        checkinsText = addStat(row2, "打卡", dp(5), 0);
+        distanceText = addStat(row2, "当前距离", 0, dp(5));
+        durationText = addStat(row2, "当前时长", dp(5), 0);
 
         return grid;
     }
@@ -804,6 +821,10 @@ public final class MainActivity extends Activity {
             return;
         }
         aMap.getUiSettings().setZoomControlsEnabled(false);
+        aMap.getUiSettings().setZoomGesturesEnabled(true);
+        aMap.getUiSettings().setScrollGesturesEnabled(true);
+        aMap.getUiSettings().setRotateGesturesEnabled(true);
+        aMap.getUiSettings().setTiltGesturesEnabled(true);
         aMap.getUiSettings().setMyLocationButtonEnabled(false);
         aMap.getUiSettings().setScaleControlsEnabled(true);
         aMap.moveCamera(CameraUpdateFactory.newCameraPosition(
@@ -817,6 +838,20 @@ public final class MainActivity extends Activity {
         locationStyle.radiusFillColor(color("#221F6F54"));
         aMap.setMyLocationStyle(locationStyle);
         enableMainMapMyLocation();
+        aMap.setOnCameraChangeListener(new AMap.OnCameraChangeListener() {
+            @Override
+            public void onCameraChange(CameraPosition cameraPosition) {
+            }
+
+            @Override
+            public void onCameraChangeFinish(CameraPosition cameraPosition) {
+                if (mainMapProgrammaticMove) {
+                    mainMapProgrammaticMove = false;
+                    return;
+                }
+                mainMapUserMoved = true;
+            }
+        });
     }
 
     private void enableMainMapMyLocation() {
@@ -858,12 +893,24 @@ public final class MainActivity extends Activity {
         }
         aMap.clear();
         enableMainMapMyLocation();
+        boolean recording = TrackRecordingService.isRecording(this);
+        TrackStore.TripRecord activeTrip = recording ? activeTodayTrip(day) : null;
+        String tripFilter = recording
+                ? (activeTrip == null ? "" : activeTrip.id)
+                : selectedTodayTripId;
+        if (tripFilter.isEmpty()) {
+            mainMapFocusKey = "";
+            return;
+        }
 
         ArrayList<LatLng> route = new ArrayList<>();
         LatLngBounds.Builder boundsBuilder = LatLngBounds.builder();
         boolean hasBounds = false;
 
         for (TrackStore.PointRecord point : day.points) {
+            if (!tripFilter.isEmpty() && !pointBelongsToTodayTrip(day, point, tripFilter)) {
+                continue;
+            }
             LatLng latLng = new LatLng(point.latitude, point.longitude);
             route.add(latLng);
             boundsBuilder.include(latLng);
@@ -892,6 +939,9 @@ public final class MainActivity extends Activity {
         }
 
         for (TrackStore.CheckinRecord checkin : day.checkins) {
+            if (!tripFilter.isEmpty() && !checkinBelongsToTodayTrip(day, checkin, tripFilter)) {
+                continue;
+            }
             LatLng latLng = new LatLng(checkin.latitude, checkin.longitude);
             boundsBuilder.include(latLng);
             hasBounds = true;
@@ -902,13 +952,70 @@ public final class MainActivity extends Activity {
                     .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_AZURE)));
         }
 
-        if (hasBounds) {
+        String focusKey = mainMapFocusKey(day, tripFilter, route.size());
+        if (hasBounds && !mainMapUserMoved && !focusKey.equals(mainMapFocusKey)) {
+            mainMapFocusKey = focusKey;
+            mainMapProgrammaticMove = true;
             aMap.animateCamera(CameraUpdateFactory.newLatLngBounds(boundsBuilder.build(), dp(42)));
         }
     }
 
+    private boolean pointBelongsToTodayTrip(TrackStore.DayRecord day, TrackStore.PointRecord point, String tripId) {
+        if (point == null || tripId == null || tripId.isEmpty()) {
+            return false;
+        }
+        if (hasText(point.tripId)) {
+            return tripId.equals(point.tripId);
+        }
+        TrackStore.TripRecord trip = todayTripById(day, tripId);
+        return timestampBelongsToTodayTrip(trip, point.timestamp);
+    }
+
+    private boolean checkinBelongsToTodayTrip(TrackStore.DayRecord day, TrackStore.CheckinRecord checkin, String tripId) {
+        if (checkin == null || tripId == null || tripId.isEmpty()) {
+            return false;
+        }
+        if (hasText(checkin.tripId)) {
+            return tripId.equals(checkin.tripId);
+        }
+        TrackStore.TripRecord trip = todayTripById(day, tripId);
+        return timestampBelongsToTodayTrip(trip, checkin.timestamp);
+    }
+
+    private boolean timestampBelongsToTodayTrip(TrackStore.TripRecord trip, long timestamp) {
+        if (trip == null || trip.startTime <= 0L || timestamp <= 0L) {
+            return false;
+        }
+        long end = trip.endTime > 0L ? trip.endTime : System.currentTimeMillis();
+        return timestamp >= trip.startTime && timestamp <= end;
+    }
+
+    private TrackStore.TripRecord todayTripById(TrackStore.DayRecord day, String tripId) {
+        if (day == null || tripId == null || tripId.isEmpty()) {
+            return null;
+        }
+        for (TrackStore.TripRecord trip : day.trips) {
+            if (trip != null && tripId.equals(trip.id)) {
+                return trip;
+            }
+        }
+        return null;
+    }
+
+    private String mainMapFocusKey(TrackStore.DayRecord day, String tripId, int routeSize) {
+        if (day == null) {
+            return "";
+        }
+        return day.date + "|" + tripId + "|" + routeSize + "|" + day.checkins.size();
+    }
+
     private void toggleRecording() {
         if (TrackRecordingService.isRecording(this)) {
+            TrackStore.TripRecord activeTrip = activeTodayTrip(TrackStore.getDay(this, TrackStore.today()));
+            selectedTodayTripId = activeTrip == null ? "" : activeTrip.id;
+            checkinRenderSignature = "";
+            mainMapUserMoved = false;
+            mainMapFocusKey = "";
             Intent intent = new Intent(this, TrackRecordingService.class);
             intent.setAction(TrackRecordingService.ACTION_STOP);
             startService(intent);
@@ -928,14 +1035,28 @@ public final class MainActivity extends Activity {
             return;
         }
 
-        Intent intent = new Intent(this, TrackRecordingService.class);
-        intent.setAction(TrackRecordingService.ACTION_START);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(intent);
-        } else {
-            startService(intent);
-        }
-        refreshUi();
+        toast("正在获取行程起点");
+        requestSingleLocation(new SingleLocationCallback() {
+            @Override
+            public void onLocation(AMapLocation location) {
+                Intent intent = new Intent(MainActivity.this, TrackRecordingService.class);
+                intent.setAction(TrackRecordingService.ACTION_START_WITH_FIX);
+                intent.putExtra(TrackRecordingService.EXTRA_LATITUDE, location.getLatitude());
+                intent.putExtra(TrackRecordingService.EXTRA_LONGITUDE, location.getLongitude());
+                intent.putExtra(TrackRecordingService.EXTRA_ACCURACY, (double) location.getAccuracy());
+                intent.putExtra(TrackRecordingService.EXTRA_SPEED, (double) location.getSpeed());
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(intent);
+                } else {
+                    startService(intent);
+                }
+                selectedTodayTripId = "";
+                checkinRenderSignature = "";
+                mainMapUserMoved = false;
+                mainMapFocusKey = "";
+                refreshUi();
+            }
+        }, false);
     }
 
     private void renderHistory() {
@@ -1603,6 +1724,7 @@ public final class MainActivity extends Activity {
                 LatLng latLng = new LatLng(location.getLatitude(), location.getLongitude());
                 if (aMap != null) {
                     enableMainMapMyLocation();
+                    mainMapProgrammaticMove = true;
                     aMap.animateCamera(CameraUpdateFactory.newLatLngZoom(latLng, 17f));
                 }
             }
@@ -1840,6 +1962,23 @@ public final class MainActivity extends Activity {
         return true;
     }
 
+    private void toggleRealtimeCloudSync() {
+        if (!ensureCloudConfigured()) {
+            return;
+        }
+        CloudSyncClient client = new CloudSyncClient(this);
+        if (!client.isLoggedIn()) {
+            showCloudNotice("请先登录", 6000L);
+            toast("请先登录");
+            return;
+        }
+        boolean enabled = !client.isRealtimeSyncEnabled();
+        client.setRealtimeSyncEnabled(enabled);
+        refreshCloudUi();
+        showCloudNotice(enabled ? "实时同步已开启" : "实时同步已关闭", 6000L);
+        toast(enabled ? "实时同步已开启" : "实时同步已关闭");
+    }
+
     private void uploadCloudSnapshot() {
         if (!ensureCloudConfigured()) {
             return;
@@ -2019,6 +2158,7 @@ public final class MainActivity extends Activity {
         setCloudButtonEnabled(cloudRegisterButton, enabled);
         setCloudButtonEnabled(cloudLoginButton, enabled);
         setCloudButtonEnabled(cloudChangePasswordButton, enabled);
+        setCloudButtonEnabled(cloudRealtimeButton, enabled);
         setCloudButtonEnabled(cloudUploadButton, enabled);
         setCloudButtonEnabled(cloudDownloadButton, enabled);
         setCloudButtonEnabled(cloudLogoutButton, enabled);
@@ -2045,12 +2185,14 @@ public final class MainActivity extends Activity {
         setCloudButtonEnabled(cloudRegisterButton, configured);
         setCloudButtonEnabled(cloudLoginButton, configured);
         setCloudButtonEnabled(cloudChangePasswordButton, configured && loggedIn);
+        setCloudButtonEnabled(cloudRealtimeButton, configured && loggedIn);
         setCloudButtonEnabled(cloudUploadButton, configured && loggedIn);
         setCloudButtonEnabled(cloudDownloadButton, configured && loggedIn);
         setCloudButtonEnabled(cloudLogoutButton, configured && loggedIn);
         setCloudSectionVisible(cloudAuthActions, configured && !loggedIn);
         setCloudSectionVisible(cloudAccountActions, configured && loggedIn);
         refreshCloudProfile(client, configured, loggedIn);
+        refreshRealtimeCloudButton(client, configured && loggedIn);
         if (!cloudNotice.isEmpty()) {
             if (System.currentTimeMillis() < cloudNoticeUntilMs) {
                 setCloudStatus(cloudNotice);
@@ -2062,10 +2204,22 @@ public final class MainActivity extends Activity {
         if (!configured) {
             cloudStatusText.setText("云同步服务未配置，当前只使用本机数据。");
         } else if (loggedIn) {
-            cloudStatusText.setText("已登录：" + cloudDisplayName(client.getUsername(), client.getEmail()) + "。当前同步不上传照片原图。");
+            cloudStatusText.setText("已登录：" + cloudDisplayName(client.getUsername(), client.getEmail())
+                    + "。实时同步：" + (client.isRealtimeSyncEnabled() ? "开" : "关")
+                    + "。照片仍保留本机。");
         } else {
             cloudStatusText.setText("未登录。可选云同步会上传轨迹、行程和打卡文字，照片仍保留本机。");
         }
+    }
+
+    private void refreshRealtimeCloudButton(CloudSyncClient client, boolean enabled) {
+        if (cloudRealtimeButton == null) {
+            return;
+        }
+        boolean realtimeEnabled = enabled && client.isRealtimeSyncEnabled();
+        cloudRealtimeButton.setText(realtimeEnabled ? "实时同步：开" : "实时同步：关");
+        cloudRealtimeButton.setBackground(realtimeEnabled ? pill(color("#1F6F54"), 10f) : outlineButtonBg());
+        cloudRealtimeButton.setTextColor(realtimeEnabled ? Color.WHITE : color("#1F6F54"));
     }
 
     private void refreshCloudProfile(CloudSyncClient client, boolean configured, boolean loggedIn) {
@@ -3024,6 +3178,10 @@ public final class MainActivity extends Activity {
     private void refreshUi() {
         TrackStore.DayRecord day = TrackStore.getDay(this, TrackStore.today());
         boolean recording = TrackRecordingService.isRecording(this);
+        if (recording && !selectedTodayTripId.isEmpty()) {
+            selectedTodayTripId = "";
+            checkinRenderSignature = "";
+        }
         TrackStore.Stats stats = TrackStore.buildStats(day, recording);
 
         statusText.setText(recording ? "记录中" : "未记录");
@@ -3070,12 +3228,20 @@ public final class MainActivity extends Activity {
         if (checkinTimelineScroller != null) {
             checkinTimelineScrollX = checkinTimelineScroller.getScrollX();
         }
-        checkinList.removeAllViews();
         List<CheckinTripGroup> groups = buildCheckinTripGroups(day);
+        boolean recording = TrackRecordingService.isRecording(this);
+        String signature = checkinRenderSignature(groups);
+        if (signature.equals(checkinRenderSignature) && checkinList.getChildCount() > 0) {
+            return;
+        }
+        checkinRenderSignature = signature;
+        checkinList.removeAllViews();
         if (groups.isEmpty()) {
             checkinTimelineScroller = null;
             TextView empty = text("今天还没有行程和打卡", 14, color("#6F756D"), Typeface.NORMAL);
-            empty.setPadding(0, dp(8), 0, dp(8));
+            empty.setGravity(Gravity.CENTER);
+            empty.setPadding(0, dp(14), 0, dp(14));
+            empty.setBackground(pill(color("#F0EDE5"), 8f));
             checkinList.addView(empty);
             return;
         }
@@ -3095,7 +3261,7 @@ public final class MainActivity extends Activity {
 
         int cardWidth = Math.max(dp(266), getResources().getDisplayMetrics().widthPixels - dp(60));
         for (int i = 0; i < groups.size(); i++) {
-            row.addView(checkinTripCard(groups.get(i), cardWidth, i == groups.size() - 1));
+            row.addView(checkinTripCard(groups.get(i), cardWidth, i == groups.size() - 1, recording));
         }
 
         checkinList.addView(scroller, matchWrap());
@@ -3106,6 +3272,32 @@ public final class MainActivity extends Activity {
                 scroller.scrollTo(restoreScrollX, 0);
             }
         });
+    }
+
+    private String checkinRenderSignature(List<CheckinTripGroup> groups) {
+        StringBuilder builder = new StringBuilder();
+        builder.append(groups.size());
+        for (CheckinTripGroup group : groups) {
+            builder.append('|')
+                    .append(group.tripId)
+                    .append(':')
+                    .append(group.startTime)
+                    .append(':')
+                    .append(group.endTime)
+                    .append(':')
+                    .append(group.checkins.size())
+                    .append(':')
+                    .append(group.tripId.equals(selectedTodayTripId) ? "selected" : "");
+            for (TrackStore.CheckinRecord checkin : group.checkins) {
+                builder.append('#')
+                        .append(checkin.id)
+                        .append('@')
+                        .append(checkin.timestamp)
+                        .append('@')
+                        .append(checkin.photos.size());
+            }
+        }
+        return builder.toString();
     }
 
     // 按行程时间段归类打卡；未处于任何行程内的打卡单独展示，避免历史数据丢失。
@@ -3154,6 +3346,19 @@ public final class MainActivity extends Activity {
         return groups;
     }
 
+    private TrackStore.TripRecord activeTodayTrip(TrackStore.DayRecord day) {
+        if (day == null) {
+            return null;
+        }
+        for (int i = day.trips.size() - 1; i >= 0; i--) {
+            TrackStore.TripRecord trip = day.trips.get(i);
+            if (trip != null && trip.startTime > 0L && trip.endTime == 0L) {
+                return trip;
+            }
+        }
+        return null;
+    }
+
     private CheckinTripGroup findCheckinTripGroup(List<CheckinTripGroup> groups, TrackStore.CheckinRecord checkin) {
         if (checkin != null && hasText(checkin.tripId)) {
             for (CheckinTripGroup group : groups) {
@@ -3184,11 +3389,13 @@ public final class MainActivity extends Activity {
         return start + " - " + end;
     }
 
-    private View checkinTripCard(CheckinTripGroup group, int width, boolean last) {
+    private View checkinTripCard(final CheckinTripGroup group, int width, boolean last, boolean recording) {
+        boolean selected = !recording && hasText(group.tripId) && group.tripId.equals(selectedTodayTripId);
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
-        card.setPadding(dp(14), dp(12), dp(14), dp(14));
-        card.setBackground(cardBg());
+        card.setMinimumHeight(dp(150));
+        card.setPadding(dp(14), dp(13), dp(14), dp(13));
+        card.setBackground(pill(selected ? color("#E8F2EA") : color("#FFFDF8"), 8f));
         LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(
                 width,
                 ViewGroup.LayoutParams.WRAP_CONTENT
@@ -3199,28 +3406,60 @@ public final class MainActivity extends Activity {
         LinearLayout header = new LinearLayout(this);
         header.setOrientation(LinearLayout.HORIZONTAL);
         header.setGravity(Gravity.CENTER_VERTICAL);
+        header.setPadding(dp(8), dp(7), dp(8), dp(7));
+        header.setBackground(pill(selected ? color("#D9ECDE") : color("#F7F4EE"), 8f));
+        if (!recording && hasText(group.tripId)) {
+            header.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View view) {
+                    selectedTodayTripId = group.tripId.equals(selectedTodayTripId) ? "" : group.tripId;
+                    checkinRenderSignature = "";
+                    mainMapUserMoved = false;
+                    mainMapFocusKey = "";
+                    refreshUi();
+                }
+            });
+        } else {
+            header.setAlpha(recording ? 0.78f : 1f);
+        }
         card.addView(header, matchWrap());
 
-        TextView title = text(group.title, 16, color("#25302B"), Typeface.BOLD);
+        TextView title = text(group.title, 16, selected ? color("#1F6F54") : color("#25302B"), Typeface.BOLD);
         header.addView(title, new LinearLayout.LayoutParams(
                 0,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 1f
         ));
 
-        TextView count = text(group.checkins.size() + " 次", 12, color("#1F6F54"), Typeface.BOLD);
+        TextView count = text(group.checkins.size() + " 次打卡", 12, color("#1F6F54"), Typeface.BOLD);
         count.setGravity(Gravity.CENTER);
-        count.setPadding(dp(9), dp(4), dp(9), dp(4));
+        count.setPadding(dp(10), dp(4), dp(10), dp(4));
         count.setBackground(pill(color("#E5F1EA"), 999f));
         header.addView(count);
 
+        if (selected) {
+            TextView selectedBadge = text("已选", 12, color("#FFFFFF"), Typeface.BOLD);
+            selectedBadge.setGravity(Gravity.CENTER);
+            selectedBadge.setPadding(dp(8), dp(4), dp(8), dp(4));
+            selectedBadge.setBackground(pill(color("#1F6F54"), 999f));
+            LinearLayout.LayoutParams selectedParams = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+            );
+            selectedParams.setMargins(dp(8), 0, 0, 0);
+            header.addView(selectedBadge, selectedParams);
+        }
+
         TextView range = text(group.subtitle, 12, color("#6F756D"), Typeface.NORMAL);
-        range.setPadding(0, dp(4), 0, dp(10));
+        range.setPadding(0, dp(5), 0, dp(12));
         card.addView(range);
 
         if (group.checkins.isEmpty()) {
             TextView empty = text("本行程还没有打卡", 13, color("#9A8F80"), Typeface.NORMAL);
-            empty.setPadding(0, dp(6), 0, 0);
+            empty.setGravity(Gravity.CENTER_VERTICAL);
+            empty.setPadding(dp(12), 0, dp(12), 0);
+            empty.setMinHeight(dp(58));
+            empty.setBackground(pill(color("#F7F4EE"), 8f));
             card.addView(empty);
             return card;
         }
@@ -3236,7 +3475,7 @@ public final class MainActivity extends Activity {
         LinearLayout item = new LinearLayout(this);
         item.setOrientation(LinearLayout.HORIZONTAL);
         item.setPadding(0, 0, 0, last ? 0 : dp(12));
-        item.setMinimumHeight(dp(58));
+        item.setMinimumHeight(dp(64));
         item.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
@@ -3247,7 +3486,7 @@ public final class MainActivity extends Activity {
         FrameLayout rail = new FrameLayout(this);
         if (!last) {
             View line = new View(this);
-            line.setBackgroundColor(color("#D8D0C0"));
+            line.setBackgroundColor(color("#E3DDD0"));
             FrameLayout.LayoutParams lineParams = new FrameLayout.LayoutParams(
                     dp(2),
                     ViewGroup.LayoutParams.MATCH_PARENT,
@@ -3259,11 +3498,11 @@ public final class MainActivity extends Activity {
         View dot = new View(this);
         dot.setBackground(pill(color("#1F6F54"), 999f));
         FrameLayout.LayoutParams dotParams = new FrameLayout.LayoutParams(
-                dp(10),
-                dp(10),
+                dp(9),
+                dp(9),
                 Gravity.TOP | Gravity.CENTER_HORIZONTAL
         );
-        dotParams.topMargin = dp(4);
+        dotParams.topMargin = dp(5);
         rail.addView(dot, dotParams);
         item.addView(rail, new LinearLayout.LayoutParams(dp(26), ViewGroup.LayoutParams.MATCH_PARENT));
 

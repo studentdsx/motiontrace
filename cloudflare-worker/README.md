@@ -126,6 +126,7 @@ https://motiontrace.631581.xyz/admin
 ## 数据结构
 
 云同步上传时，App 仍提交完整轨迹 JSON 快照。Worker 会保留原始快照，同时解析出 GPS 点位写入 `track_points` 表，便于后台查询和导出。
+用户在 App 里开启实时同步后，记录过程中新增的 GPS 点位会通过 `POST /sync/track-point` 直接写入同一张 `track_points` 表；重复上报会按稳定点位 ID 覆盖，不会产生重复行。
 
 `track_points` 主要字段：
 

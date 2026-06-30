@@ -86,6 +86,9 @@ export default {
       if (request.method === "POST" && url.pathname === "/sync/upload") {
         return await uploadSnapshot(request, env);
       }
+      if (request.method === "POST" && url.pathname === "/sync/track-point") {
+        return await uploadTrackPoint(request, env);
+      }
       if (request.method === "GET" && url.pathname === "/sync/download") {
         return await downloadSnapshot(request, env);
       }
@@ -240,6 +243,43 @@ async function uploadSnapshot(request, env) {
     now
   ).run();
   return json({ ok: true, updatedAt: now, bytes: size, trackPoints: trackPoints.length });
+}
+
+async function uploadTrackPoint(request, env) {
+  const session = await requireSession(request, env);
+  if (!session) {
+    return json({ error: "unauthorized" }, 401);
+  }
+
+  const point = normalizeRealtimeTrackPoint(await readJson(request), session.user_id, Date.now());
+  if (!point) {
+    return json({ error: "invalid_track_point" }, 400);
+  }
+
+  await env.DB.prepare(
+    "INSERT INTO track_points " +
+      "(id, user_id, date, trip_id, trip_index, point_index, timestamp, longitude, latitude, accuracy, speed, created_at) " +
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+      "ON CONFLICT(id) DO UPDATE SET " +
+      "date = excluded.date, trip_id = excluded.trip_id, trip_index = excluded.trip_index, " +
+      "point_index = excluded.point_index, timestamp = excluded.timestamp, longitude = excluded.longitude, " +
+      "latitude = excluded.latitude, accuracy = excluded.accuracy, speed = excluded.speed, created_at = excluded.created_at"
+  ).bind(
+    point.id,
+    point.userId,
+    point.date,
+    point.tripId,
+    point.tripIndex,
+    point.pointIndex,
+    point.timestamp,
+    point.longitude,
+    point.latitude,
+    point.accuracy,
+    point.speed,
+    point.createdAt
+  ).run();
+
+  return json({ ok: true, id: point.id, updatedAt: point.createdAt });
 }
 
 async function downloadSnapshot(request, env) {
@@ -1030,6 +1070,61 @@ function extractTrackPoints(root, userId, createdAt) {
     }
   }
   return rows;
+}
+
+function normalizeRealtimeTrackPoint(body, userId, createdAt) {
+  const date = String(body && body.date || "").trim();
+  const timestamp = Number(body && body.timestamp || 0);
+  const longitude = Number(body && body.longitude);
+  const latitude = Number(body && body.latitude);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)
+      || timestamp <= 0
+      || !Number.isFinite(longitude)
+      || !Number.isFinite(latitude)
+      || longitude < -180
+      || longitude > 180
+      || latitude < -90
+      || latitude > 90) {
+    return null;
+  }
+
+  const tripId = normalizeTrackText(body.tripId, "unassigned");
+  const tripIndex = nonNegativeInteger(body.tripIndex);
+  const pointIndex = nonNegativeInteger(body.pointIndex);
+  return {
+    id: stableTrackPointId(userId, date, tripId, pointIndex, timestamp),
+    userId,
+    date,
+    tripId,
+    tripIndex,
+    pointIndex,
+    timestamp,
+    longitude,
+    latitude,
+    accuracy: finiteNumber(body.accuracy),
+    speed: finiteNumber(body.speed),
+    createdAt
+  };
+}
+
+function stableTrackPointId(userId, date, tripId, pointIndex, timestamp) {
+  return ["rt", safeTrackIdPart(userId), date, safeTrackIdPart(tripId), pointIndex, timestamp].join("_").slice(0, 240);
+}
+
+function safeTrackIdPart(value) {
+  return String(value || "")
+    .replace(/[^A-Za-z0-9_.-]/g, "_")
+    .slice(0, 96) || "none";
+}
+
+function normalizeTrackText(value, fallback) {
+  const text = String(value || "").trim();
+  return (text || fallback).slice(0, 128);
+}
+
+function nonNegativeInteger(value) {
+  const number = Number.parseInt(String(value == null ? "" : value), 10);
+  return Number.isFinite(number) && number > 0 ? number : 0;
 }
 
 function buildSnapshotTripIndex(root) {

@@ -21,11 +21,19 @@ import com.amap.api.location.AMapLocationClientOption;
 import com.amap.api.location.AMapLocationListener;
 import com.amap.api.maps.MapsInitializer;
 
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
 public final class TrackRecordingService extends Service implements AMapLocationListener {
     private static final String TAG = "MotionTraceService";
     static final String ACTION_START = "com.motiontrace.diary.action.START";
+    static final String ACTION_START_WITH_FIX = "com.motiontrace.diary.action.START_WITH_FIX";
     static final String ACTION_STOP = "com.motiontrace.diary.action.STOP";
     static final String ACTION_TRACK_UPDATED = "com.motiontrace.diary.action.TRACK_UPDATED";
+    static final String EXTRA_LATITUDE = "latitude";
+    static final String EXTRA_LONGITUDE = "longitude";
+    static final String EXTRA_ACCURACY = "accuracy";
+    static final String EXTRA_SPEED = "speed";
 
     private static final String PREFS = "recording_state";
     private static final String KEY_RECORDING = "recording";
@@ -41,8 +49,10 @@ public final class TrackRecordingService extends Service implements AMapLocation
     private static final String AMAP_KEY = BuildConfig.AMAP_KEY;
 
     private AMapLocationClient locationClient;
+    private final ExecutorService realtimeSyncExecutor = Executors.newSingleThreadExecutor();
     private boolean updatesStarted;
     private long currentIntervalMs = SLOW_INTERVAL_MS;
+    private String lastRealtimeQueuedKey = "";
     private static volatile boolean serviceAlive;
 
     static boolean isRecording(Context context) {
@@ -70,7 +80,7 @@ public final class TrackRecordingService extends Service implements AMapLocation
             return START_NOT_STICKY;
         }
 
-        startTracking();
+        startTracking(intent);
         return START_NOT_STICKY;
     }
 
@@ -80,6 +90,7 @@ public final class TrackRecordingService extends Service implements AMapLocation
         TrackStore.finishActiveTrip(this);
         setRecording(false);
         serviceAlive = false;
+        realtimeSyncExecutor.shutdownNow();
         super.onDestroy();
     }
 
@@ -102,7 +113,8 @@ public final class TrackRecordingService extends Service implements AMapLocation
             updateNotification();
             return;
         }
-        TrackStore.appendPoint(this, location);
+        TrackStore.DayRecord day = TrackStore.appendPoint(this, location);
+        maybeUploadRealtimePoint(day);
         adjustLocationInterval(location);
         updateNotification();
         Intent update = new Intent(ACTION_TRACK_UPDATED);
@@ -110,14 +122,16 @@ public final class TrackRecordingService extends Service implements AMapLocation
         sendBroadcast(update);
     }
 
-    private void startTracking() {
+    private void startTracking(Intent intent) {
         if (!hasForegroundLocationPermission()) {
             stopTracking();
             return;
         }
 
         setRecording(true);
+        lastRealtimeQueuedKey = "";
         TrackStore.startTrip(this);
+        appendInitialFix(intent);
         startForegroundCompat(buildNotification());
 
         if (!updatesStarted) {
@@ -125,6 +139,22 @@ public final class TrackRecordingService extends Service implements AMapLocation
             updatesStarted = true;
         }
         updateNotification();
+    }
+
+    // 新行程启动时优先写入刚获取的实时定位点，避免连续定位先返回上次缓存点。
+    private void appendInitialFix(Intent intent) {
+        if (intent == null || !ACTION_START_WITH_FIX.equals(intent.getAction())) {
+            return;
+        }
+        if (!intent.hasExtra(EXTRA_LATITUDE) || !intent.hasExtra(EXTRA_LONGITUDE)) {
+            return;
+        }
+        double latitude = intent.getDoubleExtra(EXTRA_LATITUDE, 0.0);
+        double longitude = intent.getDoubleExtra(EXTRA_LONGITUDE, 0.0);
+        double accuracy = intent.getDoubleExtra(EXTRA_ACCURACY, 0.0);
+        double speed = intent.getDoubleExtra(EXTRA_SPEED, 0.0);
+        TrackStore.DayRecord day = TrackStore.appendPoint(this, latitude, longitude, accuracy, speed);
+        maybeUploadRealtimePoint(day);
     }
 
     private void stopTracking() {
@@ -151,7 +181,7 @@ public final class TrackRecordingService extends Service implements AMapLocation
             option.setInterval(currentIntervalMs);
             option.setNeedAddress(false);
             option.setOnceLocation(false);
-            option.setLocationCacheEnable(true);
+            option.setLocationCacheEnable(false);
             locationClient.setLocationOption(option);
             locationClient.startLocation();
         } catch (Exception e) {
@@ -178,7 +208,7 @@ public final class TrackRecordingService extends Service implements AMapLocation
         option.setInterval(currentIntervalMs);
         option.setNeedAddress(false);
         option.setOnceLocation(false);
-        option.setLocationCacheEnable(true);
+        option.setLocationCacheEnable(false);
         locationClient.setLocationOption(option);
     }
 
@@ -206,6 +236,37 @@ public final class TrackRecordingService extends Service implements AMapLocation
             locationClient = null;
         }
         updatesStarted = false;
+    }
+
+    private void maybeUploadRealtimePoint(TrackStore.DayRecord day) {
+        if (day == null || day.points.isEmpty()) {
+            return;
+        }
+        CloudSyncClient client = new CloudSyncClient(this);
+        if (!client.isConfigured() || !client.isLoggedIn() || !client.isRealtimeSyncEnabled()) {
+            return;
+        }
+
+        TrackStore.PointRecord latest = day.points.get(day.points.size() - 1);
+        final CloudSyncClient.RealtimeTrackPoint payload = client.buildRealtimePoint(day, latest);
+        if (payload == null) {
+            return;
+        }
+        String key = payload.date + "|" + payload.tripId + "|" + payload.pointIndex + "|" + payload.timestamp;
+        if (key.equals(lastRealtimeQueuedKey)) {
+            return;
+        }
+        lastRealtimeQueuedKey = key;
+        realtimeSyncExecutor.execute(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    new CloudSyncClient(TrackRecordingService.this).uploadRealtimePoint(payload);
+                } catch (Exception error) {
+                    Log.w(TAG, "realtime track sync failed", error);
+                }
+            }
+        });
     }
 
     private void startForegroundCompat(Notification notification) {

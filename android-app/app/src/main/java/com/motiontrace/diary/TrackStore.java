@@ -431,10 +431,10 @@ final class TrackStore {
         if (day == null) {
             return new Stats("0 m", "0分钟", "0", "0");
         }
-        long duration = totalTripDuration(day, recording);
+        TripRecord activeTrip = recording ? activeTrip(day) : null;
         return new Stats(
-                formatDistance(totalTripDistance(day)),
-                formatDuration(duration),
+                formatDistance(activeTrip == null ? 0.0 : tripDistance(day, activeTrip)),
+                formatDuration(activeTrip == null ? 0L : activeTripDuration(activeTrip, true)),
                 String.valueOf(day.tripCount),
                 String.valueOf(day.checkins.size())
         );
@@ -689,6 +689,58 @@ final class TrackStore {
         point.speed = object.optDouble("speed", 0.0);
         point.timestamp = object.optLong("timestamp", 0L);
         return point;
+    }
+
+    private static TripRecord activeTrip(DayRecord day) {
+        if (day == null) {
+            return null;
+        }
+        for (int i = day.trips.size() - 1; i >= 0; i--) {
+            TripRecord trip = day.trips.get(i);
+            if (trip != null && trip.startTime > 0L && trip.endTime == 0L) {
+                return trip;
+            }
+        }
+        return null;
+    }
+
+    private static double tripDistance(DayRecord day, TripRecord trip) {
+        if (day == null || trip == null || day.points.isEmpty()) {
+            return 0.0;
+        }
+        double distance = 0.0;
+        PointRecord previous = null;
+        for (PointRecord point : day.points) {
+            if (!pointBelongsToTrip(day, point, trip)) {
+                continue;
+            }
+            if (previous != null) {
+                double gap = GeoUtils.distanceMeters(previous.latitude, previous.longitude, point.latitude, point.longitude);
+                if (gap < MAX_SEGMENT_DISTANCE) {
+                    distance += gap;
+                }
+            }
+            previous = point;
+        }
+        return distance;
+    }
+
+    private static boolean pointBelongsToTrip(DayRecord day, PointRecord point, TripRecord trip) {
+        if (point == null || trip == null) {
+            return false;
+        }
+        if (!point.tripId.isEmpty() && !trip.id.isEmpty()) {
+            return point.tripId.equals(trip.id);
+        }
+        return trip.id.equals(tripIdForTimestamp(day.trips, point.timestamp));
+    }
+
+    private static long activeTripDuration(TripRecord trip, boolean recording) {
+        if (trip == null || trip.startTime <= 0L) {
+            return 0L;
+        }
+        long end = trip.endTime > 0L ? trip.endTime : (recording ? System.currentTimeMillis() : 0L);
+        return end > trip.startTime ? end - trip.startTime : 0L;
     }
 
     private static double totalTripDistance(DayRecord day) {
