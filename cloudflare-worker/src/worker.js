@@ -39,8 +39,28 @@ export default {
       if (request.method === "GET" && url.pathname === "/admin/api/submissions") {
         return await listSubmissions(request, env);
       }
+      if (request.method === "GET" && url.pathname === "/admin/api/users") {
+        return await listUsers(request, env);
+      }
+      const resetUserMatch = url.pathname.match(/^\/admin\/api\/users\/([^/]+)\/reset-password$/);
+      if (request.method === "POST" && resetUserMatch) {
+        return await resetUserPassword(request, env, decodeURIComponent(resetUserMatch[1]));
+      }
+      const userMatch = url.pathname.match(/^\/admin\/api\/users\/([^/]+)$/);
+      if ((request.method === "PATCH" || request.method === "POST") && userMatch) {
+        return await updateUser(request, env, decodeURIComponent(userMatch[1]));
+      }
+      if (request.method === "DELETE" && userMatch) {
+        return await deleteUser(request, env, decodeURIComponent(userMatch[1]));
+      }
+      if (request.method === "GET" && url.pathname === "/admin/api/trips") {
+        return await listTrackTrips(request, env);
+      }
       if (request.method === "GET" && url.pathname === "/admin/api/track-points") {
         return await listTrackPoints(request, env);
+      }
+      if (request.method === "GET" && url.pathname === "/admin/api/track-map") {
+        return await listTrackMapPoints(request, env);
       }
       if (request.method === "GET" && url.pathname === "/admin/api/track-points.csv") {
         return await exportTrackPointsCsv(request, env);
@@ -246,12 +266,147 @@ async function listSubmissions(request, env) {
   });
 }
 
+async function listUsers(request, env) {
+  if (!(await isAdminAuthenticated(request, env))) {
+    return json({ error: "unauthorized" }, 401);
+  }
+
+  const url = new URL(request.url);
+  const rawPage = Number.parseInt(url.searchParams.get("page") || "1", 10);
+  const rawPageSize = Number.parseInt(url.searchParams.get("pageSize") || "20", 10);
+  const page = Math.max(1, Number.isFinite(rawPage) ? rawPage : 1);
+  const pageSize = Math.max(1, Math.min(Number.isFinite(rawPageSize) ? rawPageSize : 20, 100));
+  const offset = (page - 1) * pageSize;
+  const search = String(url.searchParams.get("search") || "").trim().toLowerCase();
+  const clauses = [];
+  const binds = [];
+
+  if (search) {
+    clauses.push("(lower(u.email) LIKE ? OR lower(u.id) LIKE ?)");
+    binds.push("%" + search + "%", "%" + search + "%");
+  }
+  const where = clauses.length ? " WHERE " + clauses.join(" AND ") : "";
+  const totalRow = await env.DB.prepare("SELECT COUNT(*) AS total FROM users u" + where).bind(...binds).first();
+  const result = await env.DB.prepare(
+    "SELECT u.id, u.email, u.created_at, u.updated_at, " +
+      "(SELECT updated_at FROM track_snapshots s WHERE s.user_id = u.id) AS snapshot_updated_at, " +
+      "(SELECT COUNT(*) FROM track_points p WHERE p.user_id = u.id) AS point_count, " +
+      "(SELECT COUNT(DISTINCT p.date || '|' || p.trip_id) FROM track_points p WHERE p.user_id = u.id) AS trip_count " +
+      "FROM users u" + where + " ORDER BY u.created_at DESC LIMIT ? OFFSET ?"
+  ).bind(...binds, pageSize, offset).all();
+
+  return json({
+    page,
+    pageSize,
+    total: Number(totalRow && totalRow.total ? totalRow.total : 0),
+    items: (result.results || []).map((item) => ({
+      id: item.id,
+      email: item.email || "",
+      createdAt: item.created_at || 0,
+      updatedAt: item.updated_at || 0,
+      snapshotUpdatedAt: item.snapshot_updated_at || 0,
+      pointCount: item.point_count || 0,
+      tripCount: item.trip_count || 0
+    }))
+  });
+}
+
+async function updateUser(request, env, userId) {
+  if (!(await isAdminAuthenticated(request, env))) {
+    return json({ error: "unauthorized" }, 401);
+  }
+
+  const body = await readJson(request);
+  const email = normalizeEmail(body.email);
+  if (!email) {
+    return json({ error: "invalid_email" }, 400);
+  }
+
+  const user = await env.DB.prepare("SELECT id FROM users WHERE id = ?").bind(userId).first();
+  if (!user) {
+    return json({ error: "user_not_found" }, 404);
+  }
+
+  try {
+    const now = Date.now();
+    await env.DB.prepare("UPDATE users SET email = ?, updated_at = ? WHERE id = ?").bind(email, now, userId).run();
+    return json({ ok: true, user: { id: userId, email, updatedAt: now } });
+  } catch (error) {
+    if (String(error).includes("UNIQUE")) {
+      return json({ error: "email_exists" }, 409);
+    }
+    throw error;
+  }
+}
+
+async function resetUserPassword(request, env, userId) {
+  if (!(await isAdminAuthenticated(request, env))) {
+    return json({ error: "unauthorized" }, 401);
+  }
+
+  const body = await readJson(request);
+  const password = String(body.password || "");
+  if (!isValidPassword(password)) {
+    return json({ error: "invalid_password" }, 400);
+  }
+
+  const user = await env.DB.prepare("SELECT id FROM users WHERE id = ?").bind(userId).first();
+  if (!user) {
+    return json({ error: "user_not_found" }, 404);
+  }
+
+  const now = Date.now();
+  const salt = randomToken(16);
+  const passwordHash = await hashPassword(password, salt);
+  await env.DB.prepare(
+    "UPDATE users SET password_salt = ?, password_hash = ?, updated_at = ? WHERE id = ?"
+  ).bind(salt, passwordHash, now, userId).run();
+  await env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(userId).run();
+  return json({ ok: true, updatedAt: now });
+}
+
+async function deleteUser(request, env, userId) {
+  if (!(await isAdminAuthenticated(request, env))) {
+    return json({ error: "unauthorized" }, 401);
+  }
+
+  const user = await env.DB.prepare("SELECT id FROM users WHERE id = ?").bind(userId).first();
+  if (!user) {
+    return json({ error: "user_not_found" }, 404);
+  }
+
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM sessions WHERE user_id = ?").bind(userId),
+    env.DB.prepare("DELETE FROM track_points WHERE user_id = ?").bind(userId),
+    env.DB.prepare("DELETE FROM sync_submissions WHERE user_id = ?").bind(userId),
+    env.DB.prepare("DELETE FROM track_snapshots WHERE user_id = ?").bind(userId),
+    env.DB.prepare("DELETE FROM users WHERE id = ?").bind(userId)
+  ]);
+  return json({ ok: true });
+}
+
 async function listTrackPoints(request, env) {
   if (!(await isAdminAuthenticated(request, env))) {
     return json({ error: "unauthorized" }, 401);
   }
 
-  const query = buildTrackPointQuery(request, 1000);
+  const query = buildTrackPointQuery(request, { paginated: true, maxPageSize: 100 });
+  const count = await env.DB.prepare(query.countSql).bind(...query.whereBinds).first();
+  const result = await env.DB.prepare(query.sql).bind(...query.binds).all();
+  return json({
+    page: query.page,
+    pageSize: query.pageSize,
+    total: Number(count && count.total ? count.total : 0),
+    items: (result.results || []).map(formatTrackPointRow)
+  });
+}
+
+async function listTrackMapPoints(request, env) {
+  if (!(await isAdminAuthenticated(request, env))) {
+    return json({ error: "unauthorized" }, 401);
+  }
+
+  const query = buildTrackPointQuery(request, { limit: 5000, order: "asc" });
   const result = await env.DB.prepare(query.sql).bind(...query.binds).all();
   return json({
     items: (result.results || []).map(formatTrackPointRow)
@@ -263,7 +418,7 @@ async function exportTrackPointsCsv(request, env) {
     return json({ error: "unauthorized" }, 401);
   }
 
-  const query = buildTrackPointQuery(request, 10000);
+  const query = buildTrackPointQuery(request, { limit: 10000, order: "asc" });
   const result = await env.DB.prepare(query.sql).bind(...query.binds).all();
   const csv = trackPointsCsv(result.results || []);
   return new Response(csv, {
@@ -275,20 +430,71 @@ async function exportTrackPointsCsv(request, env) {
   });
 }
 
-function buildTrackPointQuery(request, maxLimit) {
+async function listTrackTrips(request, env) {
+  if (!(await isAdminAuthenticated(request, env))) {
+    return json({ error: "unauthorized" }, 401);
+  }
+
+  const query = buildTrackPointWhere(new URL(request.url), { includeTrip: false });
+  let sql =
+    "SELECT p.trip_id, p.trip_index, MIN(p.timestamp) AS start_time, MAX(p.timestamp) AS end_time, COUNT(*) AS point_count " +
+    "FROM track_points p LEFT JOIN users u ON u.id = p.user_id";
+  if (query.clauses.length) {
+    sql += " WHERE " + query.clauses.join(" AND ");
+  }
+  sql += " GROUP BY p.trip_id, p.trip_index ORDER BY MIN(p.timestamp) ASC";
+  const result = await env.DB.prepare(sql).bind(...query.binds).all();
+  return json({
+    items: (result.results || []).map((item) => ({
+      tripId: item.trip_id || "",
+      tripIndex: item.trip_index || 0,
+      startTime: item.start_time || 0,
+      endTime: item.end_time || 0,
+      pointCount: item.point_count || 0
+    }))
+  });
+}
+
+function buildTrackPointQuery(request, options = {}) {
   const url = new URL(request.url);
-  const rawLimit = Number.parseInt(url.searchParams.get("limit") || String(maxLimit), 10);
-  const limit = Math.max(1, Math.min(Number.isFinite(rawLimit) ? rawLimit : maxLimit, maxLimit));
-  const user = String(url.searchParams.get("user") || url.searchParams.get("email") || "").trim().toLowerCase();
-  const tripId = String(url.searchParams.get("tripId") || "").trim().toLowerCase();
-  const date = String(url.searchParams.get("date") || "").trim();
-  const start = parseTimeParam(url.searchParams.get("start") || url.searchParams.get("startTime"));
-  const end = parseTimeParam(url.searchParams.get("end") || url.searchParams.get("endTime"));
+  const paginated = Boolean(options.paginated);
+  const maxPageSize = options.maxPageSize || 100;
+  const rawPage = Number.parseInt(url.searchParams.get("page") || "1", 10);
+  const rawPageSize = Number.parseInt(url.searchParams.get("pageSize") || "50", 10);
+  const page = Math.max(1, Number.isFinite(rawPage) ? rawPage : 1);
+  const pageSize = Math.max(1, Math.min(Number.isFinite(rawPageSize) ? rawPageSize : 50, maxPageSize));
+  const limit = paginated
+    ? pageSize
+    : Math.max(1, Math.min(Number(options.limit || 1000), Number(options.limit || 1000)));
+  const offset = paginated ? (page - 1) * pageSize : 0;
+  const where = buildTrackPointWhere(url);
+  const order = options.order === "asc" ? "ASC" : "DESC";
 
   let sql =
     "SELECT p.id, p.user_id, u.email, p.date, p.trip_id, p.trip_index, p.point_index, " +
     "p.timestamp, p.longitude, p.latitude, p.accuracy, p.speed, p.created_at " +
     "FROM track_points p LEFT JOIN users u ON u.id = p.user_id";
+  if (where.clauses.length) {
+    sql += " WHERE " + where.clauses.join(" AND ");
+  }
+  sql += " ORDER BY p.timestamp " + order + " LIMIT ?";
+  const binds = where.binds.slice();
+  binds.push(limit);
+  if (paginated) {
+    sql += " OFFSET ?";
+    binds.push(offset);
+  }
+  let countSql = "SELECT COUNT(*) AS total FROM track_points p LEFT JOIN users u ON u.id = p.user_id";
+  if (where.clauses.length) {
+    countSql += " WHERE " + where.clauses.join(" AND ");
+  }
+  return { sql, countSql, binds, whereBinds: where.binds, page, pageSize };
+}
+
+function buildTrackPointWhere(url, options = {}) {
+  const user = String(url.searchParams.get("user") || url.searchParams.get("email") || "").trim().toLowerCase();
+  const tripId = String(url.searchParams.get("tripId") || "").trim().toLowerCase();
+  const date = String(url.searchParams.get("date") || "").trim();
   const clauses = [];
   const binds = [];
 
@@ -296,28 +502,15 @@ function buildTrackPointQuery(request, maxLimit) {
     clauses.push("(lower(u.email) LIKE ? OR lower(p.user_id) LIKE ?)");
     binds.push("%" + user + "%", "%" + user + "%");
   }
-  if (tripId) {
-    clauses.push("lower(p.trip_id) LIKE ?");
-    binds.push("%" + tripId + "%");
-  }
   if (date) {
     clauses.push("p.date = ?");
     binds.push(date);
   }
-  if (start > 0) {
-    clauses.push("p.timestamp >= ?");
-    binds.push(start);
+  if (options.includeTrip !== false && tripId) {
+    clauses.push("lower(p.trip_id) LIKE ?");
+    binds.push("%" + tripId + "%");
   }
-  if (end > 0) {
-    clauses.push("p.timestamp <= ?");
-    binds.push(end);
-  }
-  if (clauses.length) {
-    sql += " WHERE " + clauses.join(" AND ");
-  }
-  sql += " ORDER BY p.timestamp DESC LIMIT ?";
-  binds.push(limit);
-  return { sql, binds };
+  return { clauses, binds };
 }
 
 function formatTrackPointRow(item) {
@@ -661,12 +854,12 @@ function summarizeSnapshot(root) {
 
 function extractTrackPoints(root, userId, createdAt) {
   const rows = [];
+  const tripIndex = buildSnapshotTripIndex(root);
   for (const [date, day] of Object.entries(root || {})) {
     if (!day || typeof day !== "object" || Array.isArray(day)) {
       continue;
     }
     const points = Array.isArray(day.points) ? day.points : [];
-    const trips = normalizeSnapshotTrips(day);
     for (let i = 0; i < points.length; i++) {
       const point = points[i] || {};
       const latitude = Number(point.latitude);
@@ -675,14 +868,15 @@ function extractTrackPoints(root, userId, createdAt) {
       if (!Number.isFinite(latitude) || !Number.isFinite(longitude) || timestamp <= 0) {
         continue;
       }
-      const trip = findSnapshotTrip(trips, timestamp) || {
+      const trip = findSnapshotTrip(tripIndex, timestamp, String(point.tripId || "")) || {
         id: "unassigned",
-        index: 0
+        index: 0,
+        date
       };
       rows.push({
         id: randomUuid(),
         userId,
-        date,
+        date: trip.date || date,
         tripId: trip.id,
         tripIndex: trip.index,
         pointIndex: i,
@@ -698,6 +892,87 @@ function extractTrackPoints(root, userId, createdAt) {
   return rows;
 }
 
+function buildSnapshotTripIndex(root) {
+  const realTrips = [];
+  const legacyTrips = [];
+  let maxPointTimestamp = 0;
+
+  for (const [date, day] of Object.entries(root || {})) {
+    if (!day || typeof day !== "object" || Array.isArray(day)) {
+      continue;
+    }
+
+    const points = Array.isArray(day.points) ? day.points : [];
+    let firstPointTime = 0;
+    let lastPointTime = 0;
+    for (const point of points) {
+      const timestamp = Number(point && point.timestamp || 0);
+      if (timestamp <= 0) {
+        continue;
+      }
+      if (firstPointTime <= 0 || timestamp < firstPointTime) {
+        firstPointTime = timestamp;
+      }
+      if (timestamp > lastPointTime) {
+        lastPointTime = timestamp;
+      }
+      if (timestamp > maxPointTimestamp) {
+        maxPointTimestamp = timestamp;
+      }
+    }
+
+    if (Array.isArray(day.trips) && day.trips.length) {
+      for (let i = 0; i < day.trips.length; i++) {
+        const trip = normalizeSnapshotTrip(day.trips[i], date, i + 1);
+        if (trip) {
+          realTrips.push(trip);
+        }
+      }
+      continue;
+    }
+
+    const startTime = Number(day.startTime || firstPointTime || 0);
+    const endTime = Number(day.endTime || lastPointTime || startTime || 0);
+    if (startTime > 0) {
+      legacyTrips.push({
+        id: "legacy_" + date,
+        index: 1,
+        date,
+        startTime,
+        endTime,
+        effectiveEndTime: endTime
+      });
+    }
+  }
+
+  realTrips.sort((a, b) => a.startTime - b.startTime);
+  for (let i = 0; i < realTrips.length; i++) {
+    const trip = realTrips[i];
+    const nextTrip = realTrips[i + 1];
+    trip.effectiveEndTime = trip.endTime > 0
+      ? trip.endTime
+      : (nextTrip ? nextTrip.startTime - 1 : maxPointTimestamp || Number.MAX_SAFE_INTEGER);
+  }
+  legacyTrips.sort((a, b) => a.startTime - b.startTime);
+  return { realTrips, legacyTrips };
+}
+
+function normalizeSnapshotTrip(rawTrip, date, index) {
+  const trip = rawTrip || {};
+  const startTime = Number(trip.startTime || 0);
+  if (startTime <= 0) {
+    return null;
+  }
+  return {
+    id: String(trip.id || "trip_" + index),
+    index,
+    date,
+    startTime,
+    endTime: Number(trip.endTime || 0),
+    effectiveEndTime: Number(trip.endTime || 0)
+  };
+}
+
 function normalizeSnapshotTrips(day) {
   const trips = [];
   if (Array.isArray(day.trips)) {
@@ -710,8 +985,10 @@ function normalizeSnapshotTrips(day) {
       trips.push({
         id: String(trip.id || "trip_" + (i + 1)),
         index: i + 1,
+        date: day.date || "",
         startTime,
-        endTime: Number(trip.endTime || 0)
+        endTime: Number(trip.endTime || 0),
+        effectiveEndTime: Number(trip.endTime || 0)
       });
     }
   }
@@ -719,21 +996,58 @@ function normalizeSnapshotTrips(day) {
     trips.push({
       id: "legacy_1",
       index: 1,
+      date: day.date || "",
       startTime: Number(day.startTime || 0),
-      endTime: Number(day.endTime || 0)
+      endTime: Number(day.endTime || 0),
+      effectiveEndTime: Number(day.endTime || 0)
     });
   }
   return trips;
 }
 
-function findSnapshotTrip(trips, timestamp) {
+function findSnapshotTrip(index, timestamp, pointTripId = "") {
+  const tripGroups = index && index.realTrips ? [index.realTrips, index.legacyTrips || []] : [index || []];
+  if (pointTripId) {
+    for (const trips of tripGroups) {
+      const matched = findTripByIdAndTime(trips, pointTripId, timestamp);
+      if (matched) {
+        return matched;
+      }
+    }
+  }
+  for (const trips of tripGroups) {
+    const matched = findTripByTime(trips, timestamp);
+    if (matched) {
+      return matched;
+    }
+  }
+  return null;
+}
+
+function findTripByIdAndTime(trips, tripId, timestamp) {
   for (const trip of trips) {
-    const endTime = trip.endTime > 0 ? trip.endTime : Number.MAX_SAFE_INTEGER;
-    if (timestamp >= trip.startTime && timestamp <= endTime) {
+    if (trip.id === tripId && isTripTimeMatch(trip, timestamp)) {
       return trip;
     }
   }
   return null;
+}
+
+function findTripByTime(trips, timestamp) {
+  for (const trip of trips) {
+    if (isTripTimeMatch(trip, timestamp)) {
+      return trip;
+    }
+  }
+  return null;
+}
+
+function isTripTimeMatch(trip, timestamp) {
+  const endTime = trip.effectiveEndTime > 0 ? trip.effectiveEndTime : Number.MAX_SAFE_INTEGER;
+  if (timestamp >= trip.startTime && timestamp <= endTime) {
+    return true;
+  }
+  return false;
 }
 
 function finiteNumber(value) {
@@ -771,6 +1085,734 @@ async function replaceTrackPoints(env, userId, rows) {
 }
 
 function adminPage() {
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MotionTrace 管理后台</title>
+  <script>
+    window._AMapSecurityConfig = { securityJsCode: "a095663fd946546d91f3f03eab4c7b5a" };
+    window.__amapReady = false;
+    window.__amapCallbacks = [];
+    window.onAMapReady = function () {
+      window.__amapReady = true;
+      window.__amapCallbacks.splice(0).forEach(function (callback) { callback(); });
+    };
+  </script>
+  <script src="https://webapi.amap.com/maps?v=2.0&key=8c2e2da643b4d6cc38473cf1c5f1e0ac&callback=onAMapReady"></script>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f7f2;
+      --surface: #ffffff;
+      --surface-2: #f0f3ec;
+      --ink: #17211c;
+      --muted: #68756f;
+      --line: #dfe5dc;
+      --green: #1f7255;
+      --green-dark: #14503c;
+      --blue: #2b5876;
+      --red: #b64b3d;
+      --shadow: 0 12px 30px rgba(26, 40, 33, 0.08);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: "Microsoft YaHei UI", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+      letter-spacing: 0;
+    }
+    .shell { width: min(1280px, calc(100vw - 28px)); margin: 0 auto; padding: 24px 0 40px; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
+    .brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
+    .mark { width: 42px; height: 42px; display: grid; place-items: center; border-radius: 8px; background: #193f34; color: #f6fff8; font-weight: 800; box-shadow: var(--shadow); }
+    h1 { margin: 0; font-size: 24px; line-height: 1.15; }
+    .sub { margin: 5px 0 0; color: var(--muted); font-size: 14px; }
+    .actions { display: flex; align-items: center; gap: 10px; }
+    .status { min-width: 132px; padding: 8px 12px; border: 1px solid var(--line); background: var(--surface); border-radius: 8px; color: var(--muted); font-size: 13px; text-align: center; }
+    .status.ok { color: var(--green); border-color: #bfdbc9; background: #f2faf5; }
+    .status.err { color: var(--red); border-color: #edc8c2; background: #fff6f4; }
+    .top-tabs { display: inline-flex; padding: 3px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); margin-bottom: 12px; }
+    .top-tab, .tab { height: 32px; padding: 0 14px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); }
+    .top-tab.active, .tab.active { color: #fff; background: var(--blue); }
+    .section { display: none; }
+    .section.active { display: block; }
+    .filters, .user-toolbar {
+      display: grid;
+      gap: 11px;
+      align-items: end;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+    .filters { grid-template-columns: minmax(240px, 1.2fr) 150px minmax(220px, 1fr) auto auto; }
+    .user-toolbar { grid-template-columns: minmax(280px, 1fr) auto; margin-bottom: 12px; }
+    label { display: block; margin: 0 0 6px; color: #435149; font-size: 12px; font-weight: 700; }
+    input, select, button { height: 38px; border-radius: 7px; border: 1px solid var(--line); font: inherit; font-size: 14px; }
+    input, select { width: 100%; padding: 0 12px; color: var(--ink); background: #fbfcfb; outline-color: #8db69f; }
+    button { padding: 0 16px; border-color: transparent; background: var(--green); color: #fff; cursor: pointer; white-space: nowrap; font-weight: 700; }
+    button.secondary { color: var(--green-dark); border-color: #cfe1d5; background: #f6fbf8; }
+    button.ghost { color: var(--muted); border-color: var(--line); background: var(--surface); }
+    button.danger { color: #fff; background: var(--red); }
+    button:disabled { opacity: 0.55; cursor: default; }
+    button:hover:not(:disabled) { filter: brightness(0.97); }
+    .viewbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 14px 0 10px; }
+    .tabs { display: inline-flex; padding: 3px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+    .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 14px 0; }
+    .metric { border: 1px solid var(--line); background: var(--surface); border-radius: 8px; padding: 13px 14px; min-height: 78px; }
+    .metric b { display: block; font-size: 23px; line-height: 1.1; }
+    .metric span { display: block; margin-top: 8px; color: var(--muted); font-size: 13px; }
+    .panel { border: 1px solid var(--line); border-radius: 8px; background: var(--surface); overflow: hidden; }
+    .table-wrap { overflow: auto; max-height: 560px; }
+    table { width: 100%; border-collapse: collapse; min-width: 1040px; }
+    th, td { padding: 11px 12px; border-bottom: 1px solid var(--line); text-align: left; font-size: 13px; white-space: nowrap; }
+    th { position: sticky; top: 0; background: var(--surface-2); color: #405047; font-weight: 700; z-index: 1; }
+    tbody tr:hover { background: #fbfcf8; }
+    tbody tr:last-child td { border-bottom: 0; }
+    .mono { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; color: #45524b; }
+    .chip { display: inline-flex; align-items: center; min-height: 24px; padding: 0 8px; border-radius: 999px; background: #eef6f1; color: var(--green-dark); font-size: 12px; font-weight: 700; }
+    .empty { padding: 28px; color: var(--muted); text-align: center; }
+    .pager { display: flex; align-items: center; justify-content: flex-end; gap: 10px; padding: 10px 12px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
+    .map-panel { display: none; padding: 12px; }
+    .map-panel.active { display: block; }
+    .table-panel.hidden { display: none; }
+    #amap { height: 580px; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: #eef3ef; }
+    .map-note { padding-top: 8px; color: var(--muted); font-size: 12px; }
+    .row-actions { display: flex; gap: 8px; }
+    .row-actions button { height: 30px; padding: 0 10px; font-size: 12px; }
+    dialog { width: min(440px, calc(100vw - 28px)); border: 1px solid var(--line); border-radius: 8px; padding: 0; color: var(--ink); background: var(--surface); box-shadow: 0 24px 70px rgba(22, 34, 28, 0.22); }
+    dialog::backdrop { background: rgba(15, 25, 20, 0.32); }
+    .dialog-body { padding: 18px; }
+    .dialog-body h2 { margin: 0 0 14px; font-size: 19px; }
+    .dialog-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
+    @media (max-width: 820px) {
+      header { display: block; }
+      .actions { margin-top: 12px; align-items: stretch; }
+      .status { text-align: left; flex: 1; }
+      .filters, .user-toolbar { grid-template-columns: 1fr; }
+      .viewbar { display: block; }
+      .tabs { margin-bottom: 8px; }
+      .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      #amap { height: 430px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <div class="brand">
+        <div class="mark">MT</div>
+        <div>
+          <h1>MotionTrace 管理后台</h1>
+          <p class="sub">轨迹查询、地图回放、用户管理</p>
+        </div>
+      </div>
+      <div class="actions">
+        <div id="status" class="status">已登录</div>
+        <button id="logout" class="ghost">退出</button>
+      </div>
+    </header>
+
+    <nav class="top-tabs" aria-label="后台模块">
+      <button id="trackNav" class="top-tab active" type="button">轨迹管理</button>
+      <button id="userNav" class="top-tab" type="button">用户管理</button>
+    </nav>
+
+    <section id="trackSection" class="section active">
+      <section class="filters" aria-label="轨迹查询条件">
+        <div>
+          <label for="trackUser">用户</label>
+          <input id="trackUser" type="search" list="userOptions" placeholder="选择或输入邮箱 / 用户 ID">
+          <datalist id="userOptions"></datalist>
+        </div>
+        <div>
+          <label for="trackDate">轨迹日期</label>
+          <input id="trackDate" type="date">
+        </div>
+        <div>
+          <label for="trackTrip">行程 ID</label>
+          <select id="trackTrip"><option value="">全部行程</option></select>
+        </div>
+        <button id="loadTrack">查询</button>
+        <button id="clearTrack" class="secondary">重置</button>
+      </section>
+
+      <section class="viewbar" aria-label="视图切换">
+        <div class="tabs" role="tablist">
+          <button id="tableTab" class="tab active" type="button">列表</button>
+          <button id="mapTab" class="tab" type="button">地图</button>
+        </div>
+        <button id="exportCsv" class="secondary">导出 CSV</button>
+      </section>
+
+      <section class="stats" aria-label="轨迹汇总">
+        <div class="metric"><b id="mCount">0</b><span>GPS 点位</span></div>
+        <div class="metric"><b id="mTrips">0</b><span>行程数</span></div>
+        <div class="metric"><b id="mPage">1/1</b><span>列表页码</span></div>
+        <div class="metric"><b id="mRange">-</b><span>时间范围</span></div>
+      </section>
+
+      <section class="panel">
+        <div id="tablePanel" class="table-panel">
+          <div class="table-wrap" aria-label="轨迹点列表">
+            <table>
+              <thead>
+                <tr>
+                  <th>时间</th>
+                  <th>用户</th>
+                  <th>日期</th>
+                  <th>行程</th>
+                  <th>点序号</th>
+                  <th>经度</th>
+                  <th>纬度</th>
+                  <th>速度</th>
+                  <th>精度</th>
+                  <th>点位 ID</th>
+                </tr>
+              </thead>
+              <tbody id="trackRows">
+                <tr><td colspan="10" class="empty">正在加载轨迹点</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="pager">
+            <button id="trackPrev" class="ghost" type="button">上一页</button>
+            <span id="trackPager">第 1 页</span>
+            <button id="trackNext" class="ghost" type="button">下一页</button>
+          </div>
+        </div>
+        <div id="mapPanel" class="map-panel">
+          <div id="amap"></div>
+          <div id="mapNote" class="map-note">地图加载中</div>
+        </div>
+      </section>
+    </section>
+
+    <section id="userSection" class="section">
+      <section class="user-toolbar" aria-label="用户查询">
+        <div>
+          <label for="userSearch">用户搜索</label>
+          <input id="userSearch" type="search" placeholder="邮箱或用户 ID">
+        </div>
+        <button id="loadUsers">查询</button>
+      </section>
+      <section class="panel">
+        <div class="table-wrap" aria-label="用户列表">
+          <table>
+            <thead>
+              <tr>
+                <th>邮箱</th>
+                <th>用户 ID</th>
+                <th>创建时间</th>
+                <th>更新时间</th>
+                <th>轨迹点</th>
+                <th>行程</th>
+                <th>最近同步</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="userRows">
+              <tr><td colspan="8" class="empty">正在加载用户</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="pager">
+          <button id="userPrev" class="ghost" type="button">上一页</button>
+          <span id="userPager">第 1 页</span>
+          <button id="userNext" class="ghost" type="button">下一页</button>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <dialog id="editDialog">
+    <form method="dialog" class="dialog-body">
+      <h2>修改用户信息</h2>
+      <input id="editUserId" type="hidden">
+      <label for="editEmail">邮箱</label>
+      <input id="editEmail" type="email" required>
+      <div class="dialog-actions">
+        <button id="cancelEdit" class="ghost" type="button">取消</button>
+        <button id="saveEdit" type="button">保存</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="resetDialog">
+    <form method="dialog" class="dialog-body">
+      <h2>重置用户密码</h2>
+      <input id="resetUserId" type="hidden">
+      <label for="resetPassword">新密码</label>
+      <input id="resetPassword" type="password" minlength="8" required>
+      <div class="dialog-actions">
+        <button id="cancelReset" class="ghost" type="button">取消</button>
+        <button id="saveReset" type="button">重置</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script>
+    var trackState = { page: 1, pageSize: 50, total: 0, items: [], mapItems: [], view: "table" };
+    var userState = { page: 1, pageSize: 20, total: 0, items: [] };
+    var amap = null;
+    var amapOverlays = [];
+    var userOptionTimer = 0;
+    var trackUser = document.getElementById("trackUser");
+    var trackDate = document.getElementById("trackDate");
+    var trackTrip = document.getElementById("trackTrip");
+    var trackRows = document.getElementById("trackRows");
+    var userRows = document.getElementById("userRows");
+    var statusBox = document.getElementById("status");
+
+    document.getElementById("logout").addEventListener("click", logout);
+    document.getElementById("trackNav").addEventListener("click", function () { switchSection("track"); });
+    document.getElementById("userNav").addEventListener("click", function () { switchSection("users"); });
+    document.getElementById("loadTrack").addEventListener("click", function () { loadTrips().then(function () { loadTrackPage(1); }); });
+    document.getElementById("clearTrack").addEventListener("click", resetTrackFilters);
+    document.getElementById("exportCsv").addEventListener("click", exportCsv);
+    document.getElementById("tableTab").addEventListener("click", function () { setTrackView("table"); });
+    document.getElementById("mapTab").addEventListener("click", function () { setTrackView("map"); });
+    document.getElementById("trackPrev").addEventListener("click", function () { loadTrackPage(trackState.page - 1); });
+    document.getElementById("trackNext").addEventListener("click", function () { loadTrackPage(trackState.page + 1); });
+    document.getElementById("loadUsers").addEventListener("click", function () { loadUsers(1); });
+    document.getElementById("userPrev").addEventListener("click", function () { loadUsers(userState.page - 1); });
+    document.getElementById("userNext").addEventListener("click", function () { loadUsers(userState.page + 1); });
+    document.getElementById("saveEdit").addEventListener("click", saveUserEdit);
+    document.getElementById("saveReset").addEventListener("click", savePasswordReset);
+    userRows.addEventListener("click", handleUserAction);
+    document.getElementById("cancelEdit").addEventListener("click", function () { document.getElementById("editDialog").close(); });
+    document.getElementById("cancelReset").addEventListener("click", function () { document.getElementById("resetDialog").close(); });
+    trackUser.addEventListener("input", function () {
+      clearTimeout(userOptionTimer);
+      userOptionTimer = setTimeout(function () { loadUserOptions(trackUser.value.trim()); }, 180);
+    });
+    trackUser.addEventListener("change", function () { loadTrips(); });
+    trackDate.addEventListener("change", function () { loadTrips(); });
+    trackTrip.addEventListener("change", function () { loadTrackPage(1); });
+    document.getElementById("userSearch").addEventListener("keydown", function (event) {
+      if (event.key === "Enter") loadUsers(1);
+    });
+
+    setYesterday();
+    loadUserOptions("");
+    loadTrips().then(function () { return loadTrackPage(1); });
+    loadUsers(1);
+
+    function switchSection(section) {
+      document.getElementById("trackNav").className = "top-tab" + (section === "track" ? " active" : "");
+      document.getElementById("userNav").className = "top-tab" + (section === "users" ? " active" : "");
+      document.getElementById("trackSection").className = "section" + (section === "track" ? " active" : "");
+      document.getElementById("userSection").className = "section" + (section === "users" ? " active" : "");
+      if (section === "track" && trackState.view === "map") renderAmap(trackState.mapItems);
+    }
+
+    function setYesterday() {
+      var date = new Date();
+      date.setDate(date.getDate() - 1);
+      trackDate.value = localDateValue(date);
+    }
+
+    function resetTrackFilters() {
+      trackUser.value = "";
+      setYesterday();
+      loadTrips().then(function () { loadTrackPage(1); });
+    }
+
+    async function loadUserOptions(search) {
+      try {
+        var params = new URLSearchParams();
+        params.set("pageSize", "100");
+        if (search) params.set("search", search);
+        var payload = await fetchJson("/admin/api/users?" + params.toString());
+        document.getElementById("userOptions").innerHTML = (payload.items || []).map(function (item) {
+          return '<option value="' + escapeHtml(item.email || item.id) + '">' + escapeHtml(shortId(item.id)) + '</option>';
+        }).join("");
+      } catch (error) {
+      }
+    }
+
+    async function loadTrips() {
+      var current = trackTrip.value;
+      trackTrip.innerHTML = '<option value="">全部行程</option>';
+      try {
+        var params = buildTrackFilterParams();
+        var payload = await fetchJson("/admin/api/trips?" + params.toString());
+        var items = payload.items || [];
+        trackTrip.innerHTML = '<option value="">全部行程</option>' + items.map(function (item) {
+          var label = (item.tripId || "-") + " · " + formatTimeOnly(item.startTime) + "-" + formatTimeOnly(item.endTime) + " · " + number(item.pointCount) + " 点";
+          return '<option value="' + escapeHtml(item.tripId || "") + '">' + escapeHtml(label) + '</option>';
+        }).join("");
+        if (current && items.some(function (item) { return item.tripId === current; })) {
+          trackTrip.value = current;
+        }
+      } catch (error) {
+        setStatus("行程加载失败", "err");
+      }
+    }
+
+    async function loadTrackPage(page) {
+      var nextPage = Math.max(1, page || 1);
+      setStatus("查询中", "");
+      try {
+        var params = buildTrackFilterParams();
+        if (trackTrip.value) params.set("tripId", trackTrip.value);
+        params.set("page", String(nextPage));
+        params.set("pageSize", String(trackState.pageSize));
+        var payload = await fetchJson("/admin/api/track-points?" + params.toString());
+        trackState.page = payload.page || nextPage;
+        trackState.pageSize = payload.pageSize || trackState.pageSize;
+        trackState.total = payload.total || 0;
+        trackState.items = payload.items || [];
+        renderTrackRows(trackState.items);
+        renderTrackPager();
+        await loadMapPoints();
+        setStatus("已加载 " + trackState.items.length + " 点", "ok");
+      } catch (error) {
+        trackRows.innerHTML = '<tr><td colspan="10" class="empty">' + escapeHtml(error.message || "查询失败") + '</td></tr>';
+        setStatus("查询失败", "err");
+      }
+    }
+
+    async function loadMapPoints() {
+      var params = buildTrackFilterParams();
+      if (trackTrip.value) params.set("tripId", trackTrip.value);
+      var payload = await fetchJson("/admin/api/track-map?" + params.toString());
+      trackState.mapItems = payload.items || [];
+      renderTrackMetrics();
+      if (trackState.view === "map") renderAmap(trackState.mapItems);
+    }
+
+    function buildTrackFilterParams() {
+      var params = new URLSearchParams();
+      if (trackUser.value.trim()) params.set("user", trackUser.value.trim());
+      if (trackDate.value) params.set("date", trackDate.value);
+      return params;
+    }
+
+    function renderTrackRows(items) {
+      if (!items.length) {
+        trackRows.innerHTML = '<tr><td colspan="10" class="empty">没有匹配的轨迹点</td></tr>';
+        return;
+      }
+      trackRows.innerHTML = items.map(function (item) {
+        return "<tr>" +
+          "<td>" + formatTime(item.timestamp) + "</td>" +
+          "<td>" + escapeHtml(item.email || shortId(item.userId) || "-") + "</td>" +
+          "<td>" + escapeHtml(item.date || "-") + "</td>" +
+          '<td><span class="chip">' + escapeHtml(item.tripId || "-") + "</span></td>" +
+          "<td>" + number(item.pointIndex) + "</td>" +
+          '<td class="mono">' + coordinate(item.longitude) + "</td>" +
+          '<td class="mono">' + coordinate(item.latitude) + "</td>" +
+          "<td>" + speedText(item.speed) + "</td>" +
+          "<td>" + accuracyText(item.accuracy) + "</td>" +
+          '<td class="mono">' + escapeHtml(shortId(item.id)) + "</td>" +
+          "</tr>";
+      }).join("");
+    }
+
+    function renderTrackPager() {
+      var pages = Math.max(1, Math.ceil(trackState.total / trackState.pageSize));
+      document.getElementById("trackPager").textContent = "第 " + trackState.page + " / " + pages + " 页，共 " + number(trackState.total) + " 点";
+      document.getElementById("trackPrev").disabled = trackState.page <= 1;
+      document.getElementById("trackNext").disabled = trackState.page >= pages;
+      document.getElementById("mPage").textContent = trackState.page + "/" + pages;
+    }
+
+    function renderTrackMetrics() {
+      var trips = new Set();
+      var times = [];
+      trackState.mapItems.forEach(function (item) {
+        trips.add((item.userId || "") + "|" + (item.date || "") + "|" + (item.tripId || ""));
+        if (Number(item.timestamp || 0) > 0) times.push(Number(item.timestamp));
+      });
+      times.sort(function (a, b) { return a - b; });
+      document.getElementById("mCount").textContent = number(trackState.total || trackState.mapItems.length);
+      document.getElementById("mTrips").textContent = number(trips.size);
+      document.getElementById("mRange").textContent = times.length ? shortTimeRange(times[0], times[times.length - 1]) : "-";
+    }
+
+    function setTrackView(view) {
+      trackState.view = view;
+      document.getElementById("tableTab").className = "tab" + (view === "table" ? " active" : "");
+      document.getElementById("mapTab").className = "tab" + (view === "map" ? " active" : "");
+      document.getElementById("tablePanel").className = view === "table" ? "table-panel" : "table-panel hidden";
+      document.getElementById("mapPanel").className = view === "map" ? "map-panel active" : "map-panel";
+      if (view === "map") renderAmap(trackState.mapItems);
+    }
+
+    async function renderAmap(items) {
+      var note = document.getElementById("mapNote");
+      note.textContent = "地图加载中";
+      try {
+        await waitAmap();
+        if (!amap) {
+          amap = new AMap.Map("amap", { zoom: 12, resizeEnable: true, viewMode: "2D" });
+        }
+        amap.remove(amapOverlays);
+        amapOverlays = [];
+        if (!items.length) {
+          note.textContent = "没有可绘制的轨迹点";
+          return;
+        }
+        var groups = groupByTrip(items);
+        var colors = ["#1f7255", "#2b5876", "#a76321", "#7c5a9e", "#b64b3d", "#546b2f", "#3f6f7e"];
+        groups.forEach(function (group, index) {
+          var path = group.items.slice().sort(function (a, b) { return Number(a.timestamp || 0) - Number(b.timestamp || 0); }).map(function (item) {
+            return [Number(item.longitude), Number(item.latitude)];
+          });
+          if (!path.length) return;
+          var color = colors[index % colors.length];
+          if (path.length > 1) {
+            amapOverlays.push(new AMap.Polyline({ path: path, strokeColor: color, strokeOpacity: 0.9, strokeWeight: 6, lineJoin: "round", lineCap: "round" }));
+          }
+          amapOverlays.push(new AMap.Marker({ position: path[0], title: group.label + " 起点", label: { content: "起", direction: "top" } }));
+          amapOverlays.push(new AMap.Marker({ position: path[path.length - 1], title: group.label + " 终点", label: { content: "终", direction: "top" } }));
+        });
+        amap.add(amapOverlays);
+        amap.setFitView(amapOverlays, false, [40, 40, 40, 40]);
+        amap.resize();
+        note.textContent = "已绘制 " + number(items.length) + " 个点";
+      } catch (error) {
+        note.textContent = "地图加载失败";
+      }
+    }
+
+    function waitAmap() {
+      if (window.AMap && window.__amapReady) return Promise.resolve();
+      return new Promise(function (resolve, reject) {
+        var timer = setTimeout(function () { reject(new Error("amap_timeout")); }, 12000);
+        window.__amapCallbacks.push(function () {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
+    }
+
+    function groupByTrip(items) {
+      var map = {};
+      items.forEach(function (item) {
+        var key = (item.userId || "") + "|" + (item.date || "") + "|" + (item.tripId || "");
+        if (!map[key]) {
+          map[key] = { label: (item.email || shortId(item.userId) || "未知用户") + " / " + (item.date || "-") + " / " + (item.tripId || "-"), items: [] };
+        }
+        map[key].items.push(item);
+      });
+      return Object.keys(map).map(function (key) { return map[key]; });
+    }
+
+    async function loadUsers(page) {
+      var nextPage = Math.max(1, page || 1);
+      try {
+        var params = new URLSearchParams();
+        params.set("page", String(nextPage));
+        params.set("pageSize", String(userState.pageSize));
+        var search = document.getElementById("userSearch").value.trim();
+        if (search) params.set("search", search);
+        var payload = await fetchJson("/admin/api/users?" + params.toString());
+        userState.page = payload.page || nextPage;
+        userState.pageSize = payload.pageSize || userState.pageSize;
+        userState.total = payload.total || 0;
+        userState.items = payload.items || [];
+        renderUserRows(userState.items);
+        renderUserPager();
+      } catch (error) {
+        userRows.innerHTML = '<tr><td colspan="8" class="empty">' + escapeHtml(error.message || "用户加载失败") + '</td></tr>';
+      }
+    }
+
+    function renderUserRows(items) {
+      if (!items.length) {
+        userRows.innerHTML = '<tr><td colspan="8" class="empty">没有匹配用户</td></tr>';
+        return;
+      }
+      userRows.innerHTML = items.map(function (item) {
+        return "<tr>" +
+          "<td>" + escapeHtml(item.email || "-") + "</td>" +
+          '<td class="mono">' + escapeHtml(shortId(item.id)) + "</td>" +
+          "<td>" + formatTime(item.createdAt) + "</td>" +
+          "<td>" + formatTime(item.updatedAt) + "</td>" +
+          "<td>" + number(item.pointCount) + "</td>" +
+          "<td>" + number(item.tripCount) + "</td>" +
+          "<td>" + formatTime(item.snapshotUpdatedAt) + "</td>" +
+          '<td><div class="row-actions">' +
+          '<button class="secondary" type="button" data-action="edit" data-id="' + escapeHtml(item.id) + '" data-email="' + escapeHtml(item.email || "") + '">修改</button>' +
+          '<button class="secondary" type="button" data-action="reset" data-id="' + escapeHtml(item.id) + '">重置</button>' +
+          '<button class="danger" type="button" data-action="delete" data-id="' + escapeHtml(item.id) + '" data-email="' + escapeHtml(item.email || "") + '">删除</button>' +
+          "</div></td>" +
+          "</tr>";
+      }).join("");
+    }
+
+    function renderUserPager() {
+      var pages = Math.max(1, Math.ceil(userState.total / userState.pageSize));
+      document.getElementById("userPager").textContent = "第 " + userState.page + " / " + pages + " 页，共 " + number(userState.total) + " 用户";
+      document.getElementById("userPrev").disabled = userState.page <= 1;
+      document.getElementById("userNext").disabled = userState.page >= pages;
+    }
+
+    function handleUserAction(event) {
+      var button = event.target.closest("button[data-action]");
+      if (!button) return;
+      var action = button.getAttribute("data-action");
+      var id = button.getAttribute("data-id") || "";
+      var email = button.getAttribute("data-email") || "";
+      if (action === "edit") openEditUser(id, email);
+      if (action === "reset") openResetUser(id);
+      if (action === "delete") removeUser(id, email);
+    }
+
+    function openEditUser(id, email) {
+      document.getElementById("editUserId").value = id;
+      document.getElementById("editEmail").value = email;
+      document.getElementById("editDialog").showModal();
+    }
+
+    function openResetUser(id) {
+      document.getElementById("resetUserId").value = id;
+      document.getElementById("resetPassword").value = "";
+      document.getElementById("resetDialog").showModal();
+    }
+
+    async function saveUserEdit() {
+      var id = document.getElementById("editUserId").value;
+      var email = document.getElementById("editEmail").value.trim();
+      await fetchJson("/admin/api/users/" + encodeURIComponent(id), { method: "PATCH", body: JSON.stringify({ email: email }) });
+      document.getElementById("editDialog").close();
+      await loadUsers(userState.page);
+      await loadUserOptions(trackUser.value.trim());
+      setStatus("用户已更新", "ok");
+    }
+
+    async function savePasswordReset() {
+      var id = document.getElementById("resetUserId").value;
+      var password = document.getElementById("resetPassword").value;
+      await fetchJson("/admin/api/users/" + encodeURIComponent(id) + "/reset-password", { method: "POST", body: JSON.stringify({ password: password }) });
+      document.getElementById("resetDialog").close();
+      setStatus("密码已重置", "ok");
+    }
+
+    async function removeUser(id, email) {
+      if (!confirm("确认删除用户 " + (email || id) + "？该用户的轨迹和同步记录也会删除。")) return;
+      await fetchJson("/admin/api/users/" + encodeURIComponent(id), { method: "DELETE" });
+      await loadUsers(userState.page);
+      await loadUserOptions(trackUser.value.trim());
+      await loadTrips();
+      await loadTrackPage(1);
+      setStatus("用户已删除", "ok");
+    }
+
+    async function logout() {
+      await fetch("/admin/api/logout", { method: "POST", credentials: "same-origin" }).catch(function () {});
+      location.href = "/admin/login";
+    }
+
+    function exportCsv() {
+      var params = buildTrackFilterParams();
+      if (trackTrip.value) params.set("tripId", trackTrip.value);
+      location.href = "/admin/api/track-points.csv?" + params.toString();
+    }
+
+    async function fetchJson(url, options) {
+      var requestOptions = options || {};
+      requestOptions.credentials = "same-origin";
+      requestOptions.headers = Object.assign({ "Content-Type": "application/json" }, requestOptions.headers || {});
+      var response = await fetch(url, requestOptions);
+      var payload = await response.json().catch(function () { return {}; });
+      if (!response.ok) {
+        if (response.status === 401) {
+          location.href = "/admin/login";
+          return {};
+        }
+        throw new Error(errorMessage(payload.error));
+      }
+      return payload;
+    }
+
+    function setStatus(text, type) {
+      statusBox.textContent = text;
+      statusBox.className = "status" + (type ? " " + type : "");
+    }
+
+    function errorMessage(code) {
+      var map = {
+        unauthorized: "登录已过期",
+        invalid_email: "邮箱格式不正确",
+        email_exists: "邮箱已存在",
+        invalid_password: "密码至少 8 位",
+        user_not_found: "用户不存在"
+      };
+      return map[code] || code || "操作失败";
+    }
+
+    function localDateValue(date) {
+      var year = date.getFullYear();
+      var month = String(date.getMonth() + 1).padStart(2, "0");
+      var day = String(date.getDate()).padStart(2, "0");
+      return year + "-" + month + "-" + day;
+    }
+
+    function formatTime(value) {
+      if (!value) return "-";
+      return new Date(Number(value)).toLocaleString("zh-CN", { hour12: false });
+    }
+
+    function formatTimeOnly(value) {
+      if (!value) return "-";
+      return new Date(Number(value)).toLocaleTimeString("zh-CN", { hour12: false, hour: "2-digit", minute: "2-digit" });
+    }
+
+    function shortTimeRange(start, end) {
+      if (!start || !end) return "-";
+      var s = new Date(Number(start));
+      var e = new Date(Number(end));
+      var sameDay = s.toLocaleDateString("zh-CN") === e.toLocaleDateString("zh-CN");
+      if (sameDay) {
+        return s.toLocaleDateString("zh-CN") + " " + formatTimeOnly(start) + "-" + formatTimeOnly(end);
+      }
+      return s.toLocaleDateString("zh-CN") + " " + formatTimeOnly(start) + " - " + e.toLocaleDateString("zh-CN") + " " + formatTimeOnly(end);
+    }
+
+    function coordinate(value) {
+      var numberValue = Number(value || 0);
+      return Number.isFinite(numberValue) ? numberValue.toFixed(6) : "-";
+    }
+
+    function accuracyText(value) {
+      var meters = Number(value || 0);
+      return meters > 0 ? meters.toFixed(1) + " m" : "-";
+    }
+
+    function speedText(value) {
+      var speed = Number(value || 0);
+      return speed > 0 ? speed.toFixed(1) + " m/s" : "-";
+    }
+
+    function number(value) {
+      return Number(value || 0).toLocaleString("zh-CN");
+    }
+
+    function shortId(value) {
+      value = String(value || "");
+      return value.length > 12 ? value.slice(0, 8) + "..." + value.slice(-4) : value;
+    }
+
+    function escapeHtml(value) {
+      return String(value == null ? "" : value).replace(/[&<>"']/g, function (char) {
+        return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char];
+      });
+    }
+
+  </script>
+</body>
+</html>`;
+}
+
+function adminTrackLegacyPage() {
   return `<!doctype html>
 <html lang="zh-CN">
 <head>

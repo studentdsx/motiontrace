@@ -52,10 +52,13 @@ CREATE TABLE IF NOT EXISTS track_points (
 
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+CREATE INDEX IF NOT EXISTS idx_users_created_at ON users(created_at);
 CREATE INDEX IF NOT EXISTS idx_sync_submissions_user_id ON sync_submissions(user_id);
 CREATE INDEX IF NOT EXISTS idx_sync_submissions_created_at ON sync_submissions(created_at);
 CREATE INDEX IF NOT EXISTS idx_track_points_user_id ON track_points(user_id);
 CREATE INDEX IF NOT EXISTS idx_track_points_trip_id ON track_points(trip_id);
 CREATE INDEX IF NOT EXISTS idx_track_points_timestamp ON track_points(timestamp);
 CREATE INDEX IF NOT EXISTS idx_track_points_user_time ON track_points(user_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_track_points_user_date_trip ON track_points(user_id, date, trip_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_track_points_date ON track_points(date);

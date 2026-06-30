@@ -70,8 +70,9 @@ final class TrackStore {
             return getDay(context, today());
         }
 
-        String date = today();
         JSONObject root = readRoot(context);
+        ActiveTripRef active = findActiveTrip(root);
+        String date = active == null ? today() : active.date;
         JSONObject day = root.optJSONObject(date);
         if (day == null) {
             day = createDay(date);
@@ -107,12 +108,16 @@ final class TrackStore {
                 day.put("startTime", timestamp);
             }
 
+            String tripId = active == null ? activeTripId(day.optJSONArray("trips"), timestamp) : active.trip.optString("id", "");
             JSONObject point = new JSONObject();
             point.put("latitude", latitude);
             point.put("longitude", longitude);
             point.put("accuracy", accuracy);
             point.put("speed", speed);
             point.put("timestamp", timestamp);
+            if (!tripId.isEmpty()) {
+                point.put("tripId", tripId);
+            }
             points.put(point);
 
             day.put("points", points);
@@ -182,13 +187,15 @@ final class TrackStore {
             List<String> photos
     ) {
         JSONObject root = readRoot(context);
-        JSONObject day = root.optJSONObject(date);
+        ActiveTripRef active = findActiveTrip(root);
+        String targetDate = active == null ? date : active.date;
+        JSONObject day = root.optJSONObject(targetDate);
         if (day == null) {
-            day = createDay(date);
+            day = createDay(targetDate);
         }
 
         long timestamp = System.currentTimeMillis();
-        String tripId = activeTripId(day.optJSONArray("trips"), timestamp);
+        String tripId = active == null ? activeTripId(day.optJSONArray("trips"), timestamp) : active.trip.optString("id", "");
         JSONArray current = day.optJSONArray("checkins");
         JSONArray next = new JSONArray();
 
@@ -222,7 +229,7 @@ final class TrackStore {
             }
             day.put("endTime", Math.max(day.optLong("endTime", 0L), timestamp));
             day.put("checkins", next);
-            saveDay(context, root, date, day);
+            saveDay(context, root, targetDate, day);
         } catch (JSONException ignored) {
         }
 
@@ -265,8 +272,11 @@ final class TrackStore {
     }
 
     static synchronized void startTrip(Context context) {
-        String date = today();
         JSONObject root = readRoot(context);
+        if (findActiveTrip(root) != null) {
+            return;
+        }
+        String date = today();
         JSONObject day = root.optJSONObject(date);
         if (day == null) {
             day = createDay(date);
@@ -296,29 +306,18 @@ final class TrackStore {
     }
 
     static synchronized void finishActiveTrip(Context context) {
-        String date = today();
         JSONObject root = readRoot(context);
-        JSONObject day = root.optJSONObject(date);
-        if (day == null) {
-            return;
-        }
-
-        JSONArray trips = day.optJSONArray("trips");
-        if (trips == null) {
-            return;
-        }
-
-        JSONObject active = activeTrip(trips);
+        ActiveTripRef active = findActiveTrip(root);
         if (active == null) {
             return;
         }
 
         long timestamp = System.currentTimeMillis();
         try {
-            active.put("endTime", timestamp);
-            day.put("trips", trips);
-            day.put("endTime", Math.max(day.optLong("endTime", 0L), timestamp));
-            saveDay(context, root, date, day);
+            active.trip.put("endTime", timestamp);
+            active.day.put("trips", active.trips);
+            active.day.put("endTime", Math.max(active.day.optLong("endTime", 0L), timestamp));
+            saveDay(context, root, active.date, active.day);
         } catch (JSONException ignored) {
         }
     }
@@ -463,6 +462,32 @@ final class TrackStore {
         } catch (JSONException ignored) {
         }
         return day;
+    }
+
+    // 行程可能跨过零点，active trip 不能只在今天的数据里查找。
+    private static ActiveTripRef findActiveTrip(JSONObject root) {
+        ActiveTripRef latest = null;
+        Iterator<String> keys = root.keys();
+        while (keys.hasNext()) {
+            String date = keys.next();
+            JSONObject day = root.optJSONObject(date);
+            if (day == null) {
+                continue;
+            }
+            JSONArray trips = day.optJSONArray("trips");
+            if (trips == null) {
+                continue;
+            }
+            JSONObject trip = activeTrip(trips);
+            if (trip == null) {
+                continue;
+            }
+            long startTime = trip.optLong("startTime", 0L);
+            if (latest == null || startTime > latest.startTime) {
+                latest = new ActiveTripRef(date, day, trips, trip, startTime);
+            }
+        }
+        return latest;
     }
 
     private static JSONObject activeTrip(JSONArray trips) {
@@ -689,6 +714,22 @@ final class TrackStore {
         String id;
         long startTime;
         long endTime;
+    }
+
+    private static final class ActiveTripRef {
+        final String date;
+        final JSONObject day;
+        final JSONArray trips;
+        final JSONObject trip;
+        final long startTime;
+
+        ActiveTripRef(String date, JSONObject day, JSONArray trips, JSONObject trip, long startTime) {
+            this.date = date;
+            this.day = day;
+            this.trips = trips;
+            this.trip = trip;
+            this.startTime = startTime;
+        }
     }
 
     static final class PointRecord {
