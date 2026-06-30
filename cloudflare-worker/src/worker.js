@@ -15,6 +15,12 @@ export default {
         return cors(new Response(null, { status: 204 }));
       }
 
+      if (request.method === "GET" && (url.pathname === "/" || url.pathname === "")) {
+        if (await isAdminAuthenticated(request, env)) {
+          return redirect("/admin");
+        }
+        return redirect("/admin/login");
+      }
       if (request.method === "GET" && url.pathname === "/health") {
         return json({ ok: true });
       }
