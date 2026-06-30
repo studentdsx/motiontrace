@@ -23,10 +23,12 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 final class TrackStore {
     private static final String STORE_FILE = "motion_tracks_v1.json";
@@ -83,10 +85,15 @@ final class TrackStore {
             points = new JSONArray();
         }
 
-        PointRecord last = points.length() > 0 ? parsePoint(points.optJSONObject(points.length() - 1)) : null;
         long timestamp = System.currentTimeMillis();
+        String tripId = active == null ? activeTripId(day.optJSONArray("trips"), timestamp) : active.trip.optString("id", "");
+        PointRecord last = points.length() > 0 ? parsePoint(points.optJSONObject(points.length() - 1)) : null;
+        boolean sameTrip = last == null
+                || tripId.isEmpty()
+                || last.tripId.isEmpty()
+                || tripId.equals(last.tripId);
         double minPointDistance = resolveMinPointDistance(speed);
-        double gap = last == null ? 0.0 : GeoUtils.distanceMeters(
+        double gap = last == null || !sameTrip ? 0.0 : GeoUtils.distanceMeters(
                 last.latitude,
                 last.longitude,
                 latitude,
@@ -94,7 +101,7 @@ final class TrackStore {
         );
 
         try {
-            if (last != null && gap < minPointDistance) {
+            if (last != null && sameTrip && gap < minPointDistance) {
                 day.put("endTime", timestamp);
                 saveDay(context, root, date, day);
                 return parseDay(day);
@@ -108,7 +115,6 @@ final class TrackStore {
                 day.put("startTime", timestamp);
             }
 
-            String tripId = active == null ? activeTripId(day.optJSONArray("trips"), timestamp) : active.trip.optString("id", "");
             JSONObject point = new JSONObject();
             point.put("latitude", latitude);
             point.put("longitude", longitude);
@@ -238,10 +244,11 @@ final class TrackStore {
 
     static synchronized List<AddressStat> listCommonAddresses(Context context, int limit) {
         Map<String, AddressStat> byAddress = new HashMap<>();
+        Set<String> hidden = hiddenCommonAddresses(readRoot(context));
         for (DayRecord day : listDays(context)) {
             for (CheckinRecord checkin : day.checkins) {
                 String address = cleanAddress(checkin.address);
-                if (address.isEmpty()) {
+                if (address.isEmpty() || hidden.contains(address)) {
                     continue;
                 }
                 AddressStat stat = byAddress.get(address);
@@ -269,6 +276,29 @@ final class TrackStore {
         });
         int size = Math.max(0, Math.min(limit, stats.size()));
         return new ArrayList<>(stats.subList(0, size));
+    }
+
+    static synchronized void deleteCommonAddress(Context context, String address) {
+        String cleaned = cleanAddress(address);
+        if (cleaned.isEmpty()) {
+            return;
+        }
+        JSONObject root = readRoot(context);
+        JSONArray hidden = root.optJSONArray("hiddenCommonAddresses");
+        if (hidden == null) {
+            hidden = new JSONArray();
+        }
+        for (int i = 0; i < hidden.length(); i++) {
+            if (cleaned.equals(hidden.optString(i, ""))) {
+                return;
+            }
+        }
+        try {
+            hidden.put(cleaned);
+            root.put("hiddenCommonAddresses", hidden);
+            writeRoot(context, root);
+        } catch (JSONException ignored) {
+        }
     }
 
     static synchronized void startTrip(Context context) {
@@ -398,10 +428,12 @@ final class TrackStore {
     }
 
     static Stats buildStats(DayRecord day, boolean recording) {
-        long end = recording && day.startTime > 0L ? System.currentTimeMillis() : day.endTime;
-        long duration = day.startTime > 0L && end > day.startTime ? end - day.startTime : 0L;
+        if (day == null) {
+            return new Stats("0 m", "0分钟", "0", "0");
+        }
+        long duration = totalTripDuration(day, recording);
         return new Stats(
-                formatDistance(day.distanceMeters),
+                formatDistance(totalTripDistance(day)),
                 formatDuration(duration),
                 String.valueOf(day.tripCount),
                 String.valueOf(day.checkins.size())
@@ -569,6 +601,21 @@ final class TrackStore {
         file.delete();
     }
 
+    private static Set<String> hiddenCommonAddresses(JSONObject root) {
+        Set<String> hidden = new HashSet<>();
+        JSONArray values = root.optJSONArray("hiddenCommonAddresses");
+        if (values == null) {
+            return hidden;
+        }
+        for (int i = 0; i < values.length(); i++) {
+            String address = cleanAddress(values.optString(i, ""));
+            if (!address.isEmpty()) {
+                hidden.add(address);
+            }
+        }
+        return hidden;
+    }
+
     private static DayRecord parseDay(JSONObject day) {
         DayRecord record = new DayRecord();
         record.date = day.optString("date", today());
@@ -635,12 +682,88 @@ final class TrackStore {
             return null;
         }
         PointRecord point = new PointRecord();
+        point.tripId = object.optString("tripId", "");
         point.latitude = object.optDouble("latitude", 0.0);
         point.longitude = object.optDouble("longitude", 0.0);
         point.accuracy = object.optDouble("accuracy", 0.0);
         point.speed = object.optDouble("speed", 0.0);
         point.timestamp = object.optLong("timestamp", 0L);
         return point;
+    }
+
+    private static double totalTripDistance(DayRecord day) {
+        if (day == null || day.points.isEmpty()) {
+            return 0.0;
+        }
+        boolean hasTripPoint = false;
+        for (PointRecord point : day.points) {
+            if (point != null && !point.tripId.isEmpty()) {
+                hasTripPoint = true;
+                break;
+            }
+        }
+        if (!hasTripPoint || day.trips.isEmpty()) {
+            return day.distanceMeters;
+        }
+
+        double distance = 0.0;
+        Map<String, PointRecord> previousByTrip = new HashMap<>();
+        for (PointRecord point : day.points) {
+            if (point == null) {
+                continue;
+            }
+            String tripId = point.tripId.isEmpty() ? tripIdForTimestamp(day.trips, point.timestamp) : point.tripId;
+            if (tripId.isEmpty()) {
+                continue;
+            }
+            PointRecord previous = previousByTrip.get(tripId);
+            if (previous != null) {
+                double gap = GeoUtils.distanceMeters(previous.latitude, previous.longitude, point.latitude, point.longitude);
+                if (gap < MAX_SEGMENT_DISTANCE) {
+                    distance += gap;
+                }
+            }
+            previousByTrip.put(tripId, point);
+        }
+        return distance;
+    }
+
+    private static long totalTripDuration(DayRecord day, boolean recording) {
+        if (day == null) {
+            return 0L;
+        }
+        long now = System.currentTimeMillis();
+        long duration = 0L;
+        for (TripRecord trip : day.trips) {
+            if (trip == null || trip.startTime <= 0L) {
+                continue;
+            }
+            long end = trip.endTime > 0L ? trip.endTime : (recording ? now : 0L);
+            if (end > trip.startTime) {
+                duration += end - trip.startTime;
+            }
+        }
+        if (duration > 0L || !day.trips.isEmpty()) {
+            return duration;
+        }
+        long end = recording && day.startTime > 0L ? now : day.endTime;
+        return day.startTime > 0L && end > day.startTime ? end - day.startTime : 0L;
+    }
+
+    private static String tripIdForTimestamp(List<TripRecord> trips, long timestamp) {
+        if (timestamp <= 0L) {
+            return "";
+        }
+        for (TripRecord trip : trips) {
+            if (trip == null || trip.startTime <= 0L) {
+                continue;
+            }
+            long end = trip.endTime > 0L ? trip.endTime : Long.MAX_VALUE;
+            if (timestamp >= trip.startTime && timestamp <= end) {
+                return trip.id == null ? "" : trip.id;
+            }
+        }
+        return "";
     }
 
     private static CheckinRecord parseCheckin(JSONObject object) {
@@ -733,6 +856,7 @@ final class TrackStore {
     }
 
     static final class PointRecord {
+        String tripId = "";
         double latitude;
         double longitude;
         double accuracy;

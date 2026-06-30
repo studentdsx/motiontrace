@@ -6,6 +6,9 @@ const DEFAULT_ADMIN_USERNAME = "admin";
 const DEFAULT_ADMIN_PASSWORD = "Admin@1357";
 const ADMIN_SESSION_COOKIE = "motiontrace_admin";
 const ADMIN_SESSION_TTL_MS = 1000 * 60 * 60 * 8;
+const USERNAME_PATTERN = /^[A-Za-z0-9_.-]{3,32}$/;
+
+let userSchemaReady = false;
 
 export default {
   async fetch(request, env) {
@@ -95,10 +98,18 @@ export default {
 };
 
 async function register(request, env) {
+  await ensureUserSchema(env);
   const body = await readJson(request);
+  const username = normalizeUsername(body.username);
   const email = normalizeEmail(body.email);
   const password = String(body.password || "");
-  if (!email || !isValidPassword(password)) {
+  if (!username) {
+    return json({ error: "invalid_username" }, 400);
+  }
+  if (!email) {
+    return json({ error: "invalid_email" }, 400);
+  }
+  if (!isValidPassword(password)) {
     return json({ error: "invalid_credentials" }, 400);
   }
 
@@ -106,6 +117,7 @@ async function register(request, env) {
   const salt = randomToken(16);
   const user = {
     id: randomUuid(),
+    username,
     email,
     password_salt: salt,
     password_hash: await hashPassword(password, salt),
@@ -115,28 +127,38 @@ async function register(request, env) {
 
   try {
     await env.DB.prepare(
-      "INSERT INTO users (id, email, password_salt, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)"
-    ).bind(user.id, user.email, user.password_salt, user.password_hash, user.created_at, user.updated_at).run();
+      "INSERT INTO users (id, username, email, password_salt, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+    ).bind(user.id, user.username, user.email, user.password_salt, user.password_hash, user.created_at, user.updated_at).run();
   } catch (error) {
-    if (String(error).includes("UNIQUE")) {
+    const message = String(error);
+    if (message.includes("username")) {
+      return json({ error: "username_exists" }, 409);
+    }
+    if (message.includes("email")) {
       return json({ error: "email_exists" }, 409);
+    }
+    if (message.includes("UNIQUE")) {
+      return json({ error: "username_exists" }, 409);
     }
     throw error;
   }
 
   const token = await createSession(env, user.id);
-  return json({ token, user: { id: user.id, email: user.email } }, 201);
+  return json({ token, user: userResponse(user) }, 201);
 }
 
 async function login(request, env) {
+  await ensureUserSchema(env);
   const body = await readJson(request);
-  const email = normalizeEmail(body.email);
+  const identifier = normalizeLoginIdentifier(body.username || body.identifier || body.email);
   const password = String(body.password || "");
-  if (!email || !password) {
+  if (!identifier || !password) {
     return json({ error: "invalid_credentials" }, 400);
   }
 
-  const user = await env.DB.prepare("SELECT * FROM users WHERE email = ?").bind(email).first();
+  const user = await env.DB.prepare(
+    "SELECT * FROM users WHERE lower(username) = ? OR lower(email) = ? LIMIT 1"
+  ).bind(identifier, identifier).first();
   if (!user) {
     return json({ error: "invalid_credentials" }, 401);
   }
@@ -146,10 +168,11 @@ async function login(request, env) {
   await upgradePasswordHashIfNeeded(env, user, password);
 
   const token = await createSession(env, user.id);
-  return json({ token, user: { id: user.id, email: user.email } });
+  return json({ token, user: userResponse(user) });
 }
 
 async function changePassword(request, env) {
+  await ensureUserSchema(env);
   const session = await requireSession(request, env);
   if (!session) {
     return json({ error: "unauthorized" }, 401);
@@ -238,20 +261,21 @@ async function listSubmissions(request, env) {
   if (!(await isAdminAuthenticated(request, env))) {
     return json({ error: "unauthorized" }, 401);
   }
+  await ensureUserSchema(env);
 
   const url = new URL(request.url);
   const rawLimit = Number.parseInt(url.searchParams.get("limit") || "50", 10);
   const limit = Math.max(1, Math.min(Number.isFinite(rawLimit) ? rawLimit : 50, 200));
-  const email = String(url.searchParams.get("email") || "").trim().toLowerCase();
+  const user = String(url.searchParams.get("user") || url.searchParams.get("email") || "").trim().toLowerCase();
 
   let sql =
-    "SELECT s.id, s.user_id, u.email, s.bytes, s.day_count, s.point_count, " +
+    "SELECT s.id, s.user_id, u.username, u.email, s.bytes, s.day_count, s.point_count, " +
     "s.checkin_count, s.trip_count, s.created_at " +
     "FROM sync_submissions s LEFT JOIN users u ON u.id = s.user_id";
   const binds = [];
-  if (email) {
-    sql += " WHERE lower(u.email) LIKE ?";
-    binds.push("%" + email + "%");
+  if (user) {
+    sql += " WHERE lower(u.username) LIKE ? OR lower(u.email) LIKE ? OR lower(s.user_id) LIKE ?";
+    binds.push("%" + user + "%", "%" + user + "%", "%" + user + "%");
   }
   sql += " ORDER BY s.created_at DESC LIMIT ?";
   binds.push(limit);
@@ -261,6 +285,7 @@ async function listSubmissions(request, env) {
     items: (result.results || []).map((item) => ({
       id: item.id,
       userId: item.user_id,
+      username: item.username || "",
       email: item.email || "",
       bytes: item.bytes || 0,
       dayCount: item.day_count || 0,
@@ -276,6 +301,7 @@ async function listUsers(request, env) {
   if (!(await isAdminAuthenticated(request, env))) {
     return json({ error: "unauthorized" }, 401);
   }
+  await ensureUserSchema(env);
 
   const url = new URL(request.url);
   const rawPage = Number.parseInt(url.searchParams.get("page") || "1", 10);
@@ -288,13 +314,13 @@ async function listUsers(request, env) {
   const binds = [];
 
   if (search) {
-    clauses.push("(lower(u.email) LIKE ? OR lower(u.id) LIKE ?)");
-    binds.push("%" + search + "%", "%" + search + "%");
+    clauses.push("(lower(u.username) LIKE ? OR lower(u.email) LIKE ? OR lower(u.id) LIKE ?)");
+    binds.push("%" + search + "%", "%" + search + "%", "%" + search + "%");
   }
   const where = clauses.length ? " WHERE " + clauses.join(" AND ") : "";
   const totalRow = await env.DB.prepare("SELECT COUNT(*) AS total FROM users u" + where).bind(...binds).first();
   const result = await env.DB.prepare(
-    "SELECT u.id, u.email, u.created_at, u.updated_at, " +
+    "SELECT u.id, u.username, u.email, u.created_at, u.updated_at, " +
       "(SELECT updated_at FROM track_snapshots s WHERE s.user_id = u.id) AS snapshot_updated_at, " +
       "(SELECT COUNT(*) FROM track_points p WHERE p.user_id = u.id) AS point_count, " +
       "(SELECT COUNT(DISTINCT p.date || '|' || p.trip_id) FROM track_points p WHERE p.user_id = u.id) AS trip_count " +
@@ -307,6 +333,7 @@ async function listUsers(request, env) {
     total: Number(totalRow && totalRow.total ? totalRow.total : 0),
     items: (result.results || []).map((item) => ({
       id: item.id,
+      username: item.username || "",
       email: item.email || "",
       createdAt: item.created_at || 0,
       updatedAt: item.updated_at || 0,
@@ -321,9 +348,14 @@ async function updateUser(request, env, userId) {
   if (!(await isAdminAuthenticated(request, env))) {
     return json({ error: "unauthorized" }, 401);
   }
+  await ensureUserSchema(env);
 
   const body = await readJson(request);
+  const username = normalizeUsername(body.username);
   const email = normalizeEmail(body.email);
+  if (!username) {
+    return json({ error: "invalid_username" }, 400);
+  }
   if (!email) {
     return json({ error: "invalid_email" }, 400);
   }
@@ -335,11 +367,20 @@ async function updateUser(request, env, userId) {
 
   try {
     const now = Date.now();
-    await env.DB.prepare("UPDATE users SET email = ?, updated_at = ? WHERE id = ?").bind(email, now, userId).run();
-    return json({ ok: true, user: { id: userId, email, updatedAt: now } });
+    await env.DB.prepare("UPDATE users SET username = ?, email = ?, updated_at = ? WHERE id = ?")
+      .bind(username, email, now, userId)
+      .run();
+    return json({ ok: true, user: { id: userId, username, email, updatedAt: now } });
   } catch (error) {
-    if (String(error).includes("UNIQUE")) {
+    const message = String(error);
+    if (message.includes("username")) {
+      return json({ error: "username_exists" }, 409);
+    }
+    if (message.includes("email")) {
       return json({ error: "email_exists" }, 409);
+    }
+    if (message.includes("UNIQUE")) {
+      return json({ error: "username_exists" }, 409);
     }
     throw error;
   }
@@ -349,6 +390,7 @@ async function resetUserPassword(request, env, userId) {
   if (!(await isAdminAuthenticated(request, env))) {
     return json({ error: "unauthorized" }, 401);
   }
+  await ensureUserSchema(env);
 
   const body = await readJson(request);
   const password = String(body.password || "");
@@ -375,6 +417,7 @@ async function deleteUser(request, env, userId) {
   if (!(await isAdminAuthenticated(request, env))) {
     return json({ error: "unauthorized" }, 401);
   }
+  await ensureUserSchema(env);
 
   const user = await env.DB.prepare("SELECT id FROM users WHERE id = ?").bind(userId).first();
   if (!user) {
@@ -395,6 +438,7 @@ async function listTrackPoints(request, env) {
   if (!(await isAdminAuthenticated(request, env))) {
     return json({ error: "unauthorized" }, 401);
   }
+  await ensureUserSchema(env);
 
   const query = buildTrackPointQuery(request, { paginated: true, maxPageSize: 100 });
   const count = await env.DB.prepare(query.countSql).bind(...query.whereBinds).first();
@@ -411,6 +455,7 @@ async function listTrackMapPoints(request, env) {
   if (!(await isAdminAuthenticated(request, env))) {
     return json({ error: "unauthorized" }, 401);
   }
+  await ensureUserSchema(env);
 
   const query = buildTrackPointQuery(request, { limit: 5000, order: "asc" });
   const result = await env.DB.prepare(query.sql).bind(...query.binds).all();
@@ -423,6 +468,7 @@ async function exportTrackPointsCsv(request, env) {
   if (!(await isAdminAuthenticated(request, env))) {
     return json({ error: "unauthorized" }, 401);
   }
+  await ensureUserSchema(env);
 
   const query = buildTrackPointQuery(request, { limit: 10000, order: "asc" });
   const result = await env.DB.prepare(query.sql).bind(...query.binds).all();
@@ -440,6 +486,7 @@ async function listTrackTrips(request, env) {
   if (!(await isAdminAuthenticated(request, env))) {
     return json({ error: "unauthorized" }, 401);
   }
+  await ensureUserSchema(env);
 
   const query = buildTrackPointWhere(new URL(request.url), { includeTrip: false });
   let sql =
@@ -477,7 +524,7 @@ function buildTrackPointQuery(request, options = {}) {
   const order = options.order === "asc" ? "ASC" : "DESC";
 
   let sql =
-    "SELECT p.id, p.user_id, u.email, p.date, p.trip_id, p.trip_index, p.point_index, " +
+    "SELECT p.id, p.user_id, u.username, u.email, p.date, p.trip_id, p.trip_index, p.point_index, " +
     "p.timestamp, p.longitude, p.latitude, p.accuracy, p.speed, p.created_at " +
     "FROM track_points p LEFT JOIN users u ON u.id = p.user_id";
   if (where.clauses.length) {
@@ -505,8 +552,8 @@ function buildTrackPointWhere(url, options = {}) {
   const binds = [];
 
   if (user) {
-    clauses.push("(lower(u.email) LIKE ? OR lower(p.user_id) LIKE ?)");
-    binds.push("%" + user + "%", "%" + user + "%");
+    clauses.push("(lower(u.username) LIKE ? OR lower(u.email) LIKE ? OR lower(p.user_id) LIKE ?)");
+    binds.push("%" + user + "%", "%" + user + "%", "%" + user + "%");
   }
   if (date) {
     clauses.push("p.date = ?");
@@ -523,6 +570,7 @@ function formatTrackPointRow(item) {
   return {
     id: item.id,
     userId: item.user_id,
+    username: item.username || "",
     email: item.email || "",
     date: item.date || "",
     tripId: item.trip_id || "",
@@ -541,6 +589,7 @@ function trackPointsCsv(rows) {
   const header = [
     "id",
     "user_id",
+    "username",
     "email",
     "date",
     "trip_id",
@@ -558,6 +607,7 @@ function trackPointsCsv(rows) {
     lines.push([
       row.id,
       row.user_id,
+      row.username || "",
       row.email || "",
       row.date,
       row.trip_id,
@@ -711,6 +761,90 @@ async function readJson(request) {
 function normalizeEmail(value) {
   const email = String(value || "").trim().toLowerCase();
   return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) ? email : "";
+}
+
+function normalizeUsername(value) {
+  const username = String(value || "").trim().toLowerCase();
+  return USERNAME_PATTERN.test(username) ? username : "";
+}
+
+function normalizeLoginIdentifier(value) {
+  const text = String(value || "").trim().toLowerCase();
+  if (!text) {
+    return "";
+  }
+  return text.includes("@") ? normalizeEmail(text) : normalizeUsername(text);
+}
+
+function userResponse(user) {
+  return {
+    id: user.id,
+    username: user.username || "",
+    email: user.email || ""
+  };
+}
+
+async function ensureUserSchema(env) {
+  if (userSchemaReady) {
+    return;
+  }
+  try {
+    await env.DB.prepare("ALTER TABLE users ADD COLUMN username TEXT").run();
+  } catch (error) {
+    if (!String(error).toLowerCase().includes("duplicate")) {
+      // D1/SQLite 旧表补列只需要成功一次；重复执行的“已存在”错误可忽略。
+      const message = String(error).toLowerCase();
+      if (!message.includes("already exists") && !message.includes("duplicate column")) {
+        throw error;
+      }
+    }
+  }
+  await env.DB.prepare(
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username) " +
+      "WHERE username IS NOT NULL AND username <> ''"
+  ).run();
+  await assignMissingUsernames(env);
+  userSchemaReady = true;
+}
+
+async function assignMissingUsernames(env) {
+  const result = await env.DB.prepare(
+    "SELECT id, email FROM users WHERE username IS NULL OR username = '' LIMIT 200"
+  ).all();
+  for (const user of result.results || []) {
+    await assignUsernameForUser(env, user);
+  }
+}
+
+async function assignUsernameForUser(env, user) {
+  const local = String(user.email || "").split("@")[0] || "user";
+  const base = normalizeUsername(local.replace(/[^A-Za-z0-9_.-]/g, "").slice(0, 24)) || "user";
+  const suffix = String(user.id || "").replace(/-/g, "").slice(0, 6) || randomToken(3).slice(0, 6).toLowerCase();
+  const candidates = [
+    padUsername(base),
+    padUsername((base + "_" + suffix).slice(0, 32)),
+    padUsername(("user_" + suffix).slice(0, 32))
+  ];
+  for (const username of candidates) {
+    try {
+      await env.DB.prepare("UPDATE users SET username = ? WHERE id = ? AND (username IS NULL OR username = '')")
+        .bind(username, user.id)
+        .run();
+      return;
+    } catch (error) {
+      if (!String(error).includes("UNIQUE")) {
+        throw error;
+      }
+    }
+  }
+}
+
+function padUsername(value) {
+  let username = normalizeUsername(value) || "user";
+  while (username.length < 3) {
+    username += "0";
+  }
+  return username.slice(0, 32);
 }
 
 function isValidPassword(password) {
@@ -1233,7 +1367,7 @@ function adminPage() {
       <section class="filters" aria-label="轨迹查询条件">
         <div>
           <label for="trackUser">用户</label>
-          <input id="trackUser" type="search" list="userOptions" placeholder="选择或输入邮箱 / 用户 ID">
+          <input id="trackUser" type="search" list="userOptions" placeholder="选择或输入用户名 / 用户 ID">
           <datalist id="userOptions"></datalist>
         </div>
         <div>
@@ -1303,7 +1437,7 @@ function adminPage() {
       <section class="user-toolbar" aria-label="用户查询">
         <div>
           <label for="userSearch">用户搜索</label>
-          <input id="userSearch" type="search" placeholder="邮箱或用户 ID">
+          <input id="userSearch" type="search" placeholder="用户名或用户 ID">
         </div>
         <button id="loadUsers">查询</button>
       </section>
@@ -1312,6 +1446,7 @@ function adminPage() {
           <table>
             <thead>
               <tr>
+                <th>用户名</th>
                 <th>邮箱</th>
                 <th>用户 ID</th>
                 <th>创建时间</th>
@@ -1323,7 +1458,7 @@ function adminPage() {
               </tr>
             </thead>
             <tbody id="userRows">
-              <tr><td colspan="8" class="empty">正在加载用户</td></tr>
+              <tr><td colspan="9" class="empty">正在加载用户</td></tr>
             </tbody>
           </table>
         </div>
@@ -1340,6 +1475,8 @@ function adminPage() {
     <form method="dialog" class="dialog-body">
       <h2>修改用户信息</h2>
       <input id="editUserId" type="hidden">
+      <label for="editUsername">用户名</label>
+      <input id="editUsername" type="text" minlength="3" maxlength="32" required>
       <label for="editEmail">邮箱</label>
       <input id="editEmail" type="email" required>
       <div class="dialog-actions">
@@ -1436,7 +1573,9 @@ function adminPage() {
         if (search) params.set("search", search);
         var payload = await fetchJson("/admin/api/users?" + params.toString());
         document.getElementById("userOptions").innerHTML = (payload.items || []).map(function (item) {
-          return '<option value="' + escapeHtml(item.email || item.id) + '">' + escapeHtml(shortId(item.id)) + '</option>';
+          var value = item.username || item.email || item.id;
+          var label = (item.email || shortId(item.id));
+          return '<option value="' + escapeHtml(value) + '">' + escapeHtml(label) + '</option>';
         }).join("");
       } catch (error) {
       }
@@ -1500,6 +1639,10 @@ function adminPage() {
       return params;
     }
 
+    function displayUser(item) {
+      return (item && (item.username || item.email || shortId(item.userId || item.id))) || "-";
+    }
+
     function renderTrackRows(items) {
       if (!items.length) {
         trackRows.innerHTML = '<tr><td colspan="10" class="empty">没有匹配的轨迹点</td></tr>';
@@ -1508,7 +1651,7 @@ function adminPage() {
       trackRows.innerHTML = items.map(function (item) {
         return "<tr>" +
           "<td>" + formatTime(item.timestamp) + "</td>" +
-          "<td>" + escapeHtml(item.email || shortId(item.userId) || "-") + "</td>" +
+          "<td>" + escapeHtml(displayUser(item)) + "</td>" +
           "<td>" + escapeHtml(item.date || "-") + "</td>" +
           '<td><span class="chip">' + escapeHtml(item.tripId || "-") + "</span></td>" +
           "<td>" + number(item.pointIndex) + "</td>" +
@@ -1604,7 +1747,7 @@ function adminPage() {
       items.forEach(function (item) {
         var key = (item.userId || "") + "|" + (item.date || "") + "|" + (item.tripId || "");
         if (!map[key]) {
-          map[key] = { label: (item.email || shortId(item.userId) || "未知用户") + " / " + (item.date || "-") + " / " + (item.tripId || "-"), items: [] };
+          map[key] = { label: displayUser(item) + " / " + (item.date || "-") + " / " + (item.tripId || "-"), items: [] };
         }
         map[key].items.push(item);
       });
@@ -1627,17 +1770,18 @@ function adminPage() {
         renderUserRows(userState.items);
         renderUserPager();
       } catch (error) {
-        userRows.innerHTML = '<tr><td colspan="8" class="empty">' + escapeHtml(error.message || "用户加载失败") + '</td></tr>';
+        userRows.innerHTML = '<tr><td colspan="9" class="empty">' + escapeHtml(error.message || "用户加载失败") + '</td></tr>';
       }
     }
 
     function renderUserRows(items) {
       if (!items.length) {
-        userRows.innerHTML = '<tr><td colspan="8" class="empty">没有匹配用户</td></tr>';
+        userRows.innerHTML = '<tr><td colspan="9" class="empty">没有匹配用户</td></tr>';
         return;
       }
       userRows.innerHTML = items.map(function (item) {
         return "<tr>" +
+          "<td>" + escapeHtml(item.username || "-") + "</td>" +
           "<td>" + escapeHtml(item.email || "-") + "</td>" +
           '<td class="mono">' + escapeHtml(shortId(item.id)) + "</td>" +
           "<td>" + formatTime(item.createdAt) + "</td>" +
@@ -1646,9 +1790,9 @@ function adminPage() {
           "<td>" + number(item.tripCount) + "</td>" +
           "<td>" + formatTime(item.snapshotUpdatedAt) + "</td>" +
           '<td><div class="row-actions">' +
-          '<button class="secondary" type="button" data-action="edit" data-id="' + escapeHtml(item.id) + '" data-email="' + escapeHtml(item.email || "") + '">修改</button>' +
+          '<button class="secondary" type="button" data-action="edit" data-id="' + escapeHtml(item.id) + '" data-username="' + escapeHtml(item.username || "") + '" data-email="' + escapeHtml(item.email || "") + '">修改</button>' +
           '<button class="secondary" type="button" data-action="reset" data-id="' + escapeHtml(item.id) + '">重置</button>' +
-          '<button class="danger" type="button" data-action="delete" data-id="' + escapeHtml(item.id) + '" data-email="' + escapeHtml(item.email || "") + '">删除</button>' +
+          '<button class="danger" type="button" data-action="delete" data-id="' + escapeHtml(item.id) + '" data-username="' + escapeHtml(item.username || "") + '" data-email="' + escapeHtml(item.email || "") + '">删除</button>' +
           "</div></td>" +
           "</tr>";
       }).join("");
@@ -1666,14 +1810,16 @@ function adminPage() {
       if (!button) return;
       var action = button.getAttribute("data-action");
       var id = button.getAttribute("data-id") || "";
+      var username = button.getAttribute("data-username") || "";
       var email = button.getAttribute("data-email") || "";
-      if (action === "edit") openEditUser(id, email);
+      if (action === "edit") openEditUser(id, username, email);
       if (action === "reset") openResetUser(id);
-      if (action === "delete") removeUser(id, email);
+      if (action === "delete") removeUser(id, username || email);
     }
 
-    function openEditUser(id, email) {
+    function openEditUser(id, username, email) {
       document.getElementById("editUserId").value = id;
+      document.getElementById("editUsername").value = username;
       document.getElementById("editEmail").value = email;
       document.getElementById("editDialog").showModal();
     }
@@ -1686,8 +1832,9 @@ function adminPage() {
 
     async function saveUserEdit() {
       var id = document.getElementById("editUserId").value;
+      var username = document.getElementById("editUsername").value.trim();
       var email = document.getElementById("editEmail").value.trim();
-      await fetchJson("/admin/api/users/" + encodeURIComponent(id), { method: "PATCH", body: JSON.stringify({ email: email }) });
+      await fetchJson("/admin/api/users/" + encodeURIComponent(id), { method: "PATCH", body: JSON.stringify({ username: username, email: email }) });
       document.getElementById("editDialog").close();
       await loadUsers(userState.page);
       await loadUserOptions(trackUser.value.trim());
@@ -1702,8 +1849,8 @@ function adminPage() {
       setStatus("密码已重置", "ok");
     }
 
-    async function removeUser(id, email) {
-      if (!confirm("确认删除用户 " + (email || id) + "？该用户的轨迹和同步记录也会删除。")) return;
+    async function removeUser(id, name) {
+      if (!confirm("确认删除用户 " + (name || id) + "？该用户的轨迹和同步记录也会删除。")) return;
       await fetchJson("/admin/api/users/" + encodeURIComponent(id), { method: "DELETE" });
       await loadUsers(userState.page);
       await loadUserOptions(trackUser.value.trim());
@@ -1747,6 +1894,8 @@ function adminPage() {
     function errorMessage(code) {
       var map = {
         unauthorized: "登录已过期",
+        invalid_username: "用户名需为 3-32 位字母、数字、下划线、点或横线",
+        username_exists: "用户名已存在",
         invalid_email: "邮箱格式不正确",
         email_exists: "邮箱已存在",
         invalid_password: "密码至少 8 位",

@@ -26,8 +26,8 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
-import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
+import android.widget.AutoCompleteTextView;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
@@ -35,7 +35,6 @@ import android.widget.ImageView;
 import android.widget.ImageButton;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
-import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -770,8 +769,8 @@ public final class MainActivity extends Activity {
         row1.setOrientation(LinearLayout.HORIZONTAL);
         grid.addView(row1, matchWrap());
 
-        distanceText = addStat(row1, "距离", 0, dp(5));
-        durationText = addStat(row1, "时长", dp(5), 0);
+        distanceText = addStat(row1, "总距离", 0, dp(5));
+        durationText = addStat(row1, "总时长", dp(5), 0);
 
         LinearLayout row2 = new LinearLayout(this);
         row2.setOrientation(LinearLayout.HORIZONTAL);
@@ -1683,15 +1682,23 @@ public final class MainActivity extends Activity {
         subtitle.setPadding(0, dp(5), 0, dp(14));
         content.addView(subtitle);
 
-        final EditText emailInput = input("邮箱", false);
-        emailInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS);
+        final EditText usernameInput = input(register ? "用户名，3-32 位" : "用户名", false);
+        usernameInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_NORMAL);
         final EditText passwordInput = input(register ? "密码，至少 8 位" : "密码", true);
-        String savedEmail = new CloudSyncClient(this).getEmail();
-        if (!savedEmail.isEmpty()) {
-            emailInput.setText(savedEmail);
+        final EditText emailInput = input("邮箱，用于找回密码", false);
+        emailInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS);
+        CloudSyncClient savedClient = new CloudSyncClient(this);
+        String savedUsername = savedClient.getUsername();
+        if (!savedUsername.isEmpty()) {
+            usernameInput.setText(savedUsername);
+        } else if (!savedClient.getEmail().isEmpty()) {
+            usernameInput.setText(savedClient.getEmail());
         }
-        content.addView(emailInput, inputParams(0));
+        content.addView(usernameInput, inputParams(0));
         content.addView(passwordInput, inputParams(dp(10)));
+        if (register) {
+            content.addView(emailInput, inputParams(dp(10)));
+        }
 
         LinearLayout actions = new LinearLayout(this);
         actions.setOrientation(LinearLayout.HORIZONTAL);
@@ -1720,11 +1727,12 @@ public final class MainActivity extends Activity {
         submitButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
-                String email = inputValue(emailInput);
+                String username = inputValue(usernameInput);
                 String password = inputValue(passwordInput);
+                String email = register ? inputValue(emailInput) : "";
                 boolean started = register
-                        ? startRegisterCloudAccount(email, password)
-                        : startLoginCloudAccount(email, password);
+                        ? startRegisterCloudAccount(username, password, email)
+                        : startLoginCloudAccount(username, password);
                 if (started && dialogRef[0] != null) {
                     dialogRef[0].dismiss();
                 }
@@ -1733,28 +1741,28 @@ public final class MainActivity extends Activity {
         dialog.show();
     }
 
-    private boolean startRegisterCloudAccount(final String email, final String password) {
-        if (!ensureCloudConfigured() || !validateCloudCredentials(email, password, true)) {
+    private boolean startRegisterCloudAccount(final String username, final String password, final String email) {
+        if (!ensureCloudConfigured() || !validateRegisterCredentials(username, password, email)) {
             return false;
         }
         runCloudTask("正在注册", new CloudTask() {
             @Override
             public String run() throws Exception {
-                new CloudSyncClient(MainActivity.this).register(email, password);
+                new CloudSyncClient(MainActivity.this).register(username, password, email);
                 return "注册并登录成功";
             }
         });
         return true;
     }
 
-    private boolean startLoginCloudAccount(final String email, final String password) {
-        if (!ensureCloudConfigured() || !validateCloudCredentials(email, password, false)) {
+    private boolean startLoginCloudAccount(final String username, final String password) {
+        if (!ensureCloudConfigured() || !validateLoginCredentials(username, password)) {
             return false;
         }
         runCloudTask("正在登录", new CloudTask() {
             @Override
             public String run() throws Exception {
-                new CloudSyncClient(MainActivity.this).login(email, password);
+                new CloudSyncClient(MainActivity.this).login(username, password);
                 return "登录成功";
             }
         });
@@ -1930,7 +1938,34 @@ public final class MainActivity extends Activity {
         return false;
     }
 
-    private boolean validateCloudCredentials(String email, String password, boolean requireNewPassword) {
+    private boolean validateLoginCredentials(String username, String password) {
+        if (username.isEmpty()) {
+            showCloudNotice("请先输入用户名", 6000L);
+            toast("请先输入用户名");
+            return false;
+        }
+        if (password.isEmpty()) {
+            showCloudNotice("请先输入密码", 6000L);
+            toast("请先输入密码");
+            return false;
+        }
+        return true;
+    }
+
+    private boolean validateRegisterCredentials(String username, String password, String email) {
+        if (!validateLoginCredentials(username, password)) {
+            return false;
+        }
+        if (!isValidUsername(username)) {
+            showCloudNotice("用户名需为 3-32 位字母、数字、下划线、点或横线", 6000L);
+            toast("用户名格式不正确");
+            return false;
+        }
+        if (password.length() < 8) {
+            showCloudNotice("密码至少 8 位", 6000L);
+            toast("密码至少 8 位");
+            return false;
+        }
         if (email.isEmpty()) {
             showCloudNotice("请先输入邮箱", 6000L);
             toast("请先输入邮箱");
@@ -1941,17 +1976,11 @@ public final class MainActivity extends Activity {
             toast("邮箱格式不正确");
             return false;
         }
-        if (password.isEmpty()) {
-            showCloudNotice("请先输入密码", 6000L);
-            toast("请先输入密码");
-            return false;
-        }
-        if (requireNewPassword && password.length() < 8) {
-            showCloudNotice("密码至少 8 位", 6000L);
-            toast("密码至少 8 位");
-            return false;
-        }
         return true;
+    }
+
+    private boolean isValidUsername(String username) {
+        return username != null && username.matches("[A-Za-z0-9_.-]{3,32}");
     }
 
     private String cloudErrorMessage(Exception error) {
@@ -2033,7 +2062,7 @@ public final class MainActivity extends Activity {
         if (!configured) {
             cloudStatusText.setText("云同步服务未配置，当前只使用本机数据。");
         } else if (loggedIn) {
-            cloudStatusText.setText("已登录：" + client.getEmail() + "。当前同步不上传照片原图。");
+            cloudStatusText.setText("已登录：" + cloudDisplayName(client.getUsername(), client.getEmail()) + "。当前同步不上传照片原图。");
         } else {
             cloudStatusText.setText("未登录。可选云同步会上传轨迹、行程和打卡文字，照片仍保留本机。");
         }
@@ -2059,22 +2088,24 @@ public final class MainActivity extends Activity {
             cloudAvatarText.setBackground(pill(color("#E8F2EA"), 999f));
             return;
         }
+        String username = client.getUsername();
         String email = client.getEmail();
-        String displayName = cloudDisplayName(email);
+        String displayName = cloudDisplayName(username, email);
         cloudNameText.setText(displayName);
-        cloudMetaText.setText(email);
+        cloudMetaText.setText(email.isEmpty() ? "邮箱未保存" : email);
         cloudAvatarText.setText(cloudAvatarLabel(displayName));
         cloudAvatarText.setTextColor(Color.WHITE);
         cloudAvatarText.setBackground(pill(color("#1F6F54"), 999f));
     }
 
-    private String cloudDisplayName(String email) {
+    private String cloudDisplayName(String username, String email) {
+        String name = username == null ? "" : username.trim();
+        if (!name.isEmpty()) {
+            return name;
+        }
         String value = email == null ? "" : email.trim();
         int at = value.indexOf("@");
-        if (at > 0) {
-            return value.substring(0, at);
-        }
-        return value.isEmpty() ? "云同步用户" : value;
+        return at > 0 ? value.substring(0, at) : (value.isEmpty() ? "云同步用户" : value);
     }
 
     private String cloudAvatarLabel(String displayName) {
@@ -2108,7 +2139,7 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private View commonAddressRow(TrackStore.AddressStat stat) {
+    private View commonAddressRow(final TrackStore.AddressStat stat) {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
@@ -2125,11 +2156,20 @@ public final class MainActivity extends Activity {
         count.setPadding(0, dp(3), 0, 0);
         textBox.addView(count);
 
-        TextView badge = text("常用", 12, color("#1F6F54"), Typeface.BOLD);
-        badge.setGravity(Gravity.CENTER);
-        badge.setPadding(dp(9), dp(5), dp(9), dp(5));
-        badge.setBackground(pill(color("#E8F2EA"), 999f));
-        row.addView(badge);
+        Button deleteButton = compactButton("删除", false);
+        deleteButton.setTextSize(12);
+        deleteButton.setPadding(dp(9), 0, dp(9), 0);
+        deleteButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                TrackStore.deleteCommonAddress(MainActivity.this, stat.address);
+                refreshCommonAddressUi();
+                toast("已从常用地址移除");
+            }
+        });
+        LinearLayout.LayoutParams deleteParams = new LinearLayout.LayoutParams(dp(58), dp(34));
+        deleteParams.setMargins(dp(10), 0, 0, 0);
+        row.addView(deleteButton, deleteParams);
         return row;
     }
 
@@ -2443,9 +2483,23 @@ public final class MainActivity extends Activity {
                 }
                 if (poi != null) {
                     addAddressOption(options, poi.getTitle());
+                    addAddressOption(options, joinAddressParts(poi.getTitle(), invokeString(poi, "getSnippet")));
                 }
             }
         }
+        addReflectListAddressOptions(options, address, "getAois", "getAoiName");
+        addReflectListAddressOptions(options, address, "getAois", "getName");
+        Object streetNumber = invokeNoArg(address, "getStreetNumber");
+        addAddressOption(options, joinAddressParts(invokeString(streetNumber, "getStreet"), invokeString(streetNumber, "getNumber")));
+        addAddressOption(options, joinAddressParts(
+                invokeString(address, "getDistrict"),
+                invokeString(address, "getTownship"),
+                invokeString(address, "getNeighborhood")
+        ));
+        addAddressOption(options, joinAddressParts(
+                invokeString(address, "getTownship"),
+                invokeString(address, "getBuilding")
+        ));
         addAddressOption(options, address.getFormatAddress());
         return options;
     }
@@ -2457,6 +2511,52 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private void addReflectListAddressOptions(ArrayList<String> options, Object target, String listMethod, String itemMethod) {
+        Object value = invokeNoArg(target, listMethod);
+        if (!(value instanceof List<?>)) {
+            return;
+        }
+        for (Object item : (List<?>) value) {
+            if (options.size() >= 12) {
+                break;
+            }
+            addAddressOption(options, invokeString(item, itemMethod));
+        }
+    }
+
+    private String joinAddressParts(String first, String second) {
+        String a = cleanText(first);
+        String b = cleanText(second);
+        if (a.isEmpty()) {
+            return b;
+        }
+        if (b.isEmpty() || a.equals(b) || a.contains(b)) {
+            return a;
+        }
+        return a + " " + b;
+    }
+
+    private String joinAddressParts(String first, String second, String third) {
+        return joinAddressParts(joinAddressParts(first, second), third);
+    }
+
+    private String invokeString(Object target, String methodName) {
+        Object value = invokeNoArg(target, methodName);
+        return value == null ? "" : String.valueOf(value);
+    }
+
+    private Object invokeNoArg(Object target, String methodName) {
+        if (target == null) {
+            return null;
+        }
+        try {
+            java.lang.reflect.Method method = target.getClass().getMethod(methodName);
+            return method.invoke(target);
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
     private void showAddressPickerDialog() {
         if (activeCheckinDialog == null) {
             return;
@@ -2465,58 +2565,55 @@ public final class MainActivity extends Activity {
         content.setOrientation(LinearLayout.VERTICAL);
         content.setPadding(dp(4), dp(8), dp(4), 0);
 
-        final EditText manualInput = input("手动输入地名", false);
         String initial = pendingCheckinAddress;
         if (initial == null || initial.isEmpty()) {
             initial = pendingAddressOptions.isEmpty() ? "" : pendingAddressOptions.get(0);
         }
 
-        if (!pendingAddressOptions.isEmpty()) {
-            TextView pickerLabel = text("候选地址", 13, color("#6F756D"), Typeface.BOLD);
-            content.addView(pickerLabel);
+        TextView pickerLabel = text("候选地址 / 手动输入", 13, color("#6F756D"), Typeface.BOLD);
+        content.addView(pickerLabel);
 
-            final Spinner picker = new Spinner(this);
-            picker.setBackground(outlineButtonBg());
+        final AutoCompleteTextView addressInput = new AutoCompleteTextView(this);
+        addressInput.setHint("输入关键词筛选地名");
+        addressInput.setTextSize(15);
+        addressInput.setSingleLine(true);
+        addressInput.setTextColor(color("#25302B"));
+        addressInput.setHintTextColor(color("#9A8F80"));
+        addressInput.setPadding(dp(12), dp(9), dp(12), dp(9));
+        addressInput.setBackground(outlineButtonBg());
+        addressInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
+        addressInput.setThreshold(0);
+        if (!pendingAddressOptions.isEmpty()) {
             ArrayAdapter<String> adapter = new ArrayAdapter<>(
                     this,
-                    android.R.layout.simple_spinner_item,
+                    android.R.layout.simple_dropdown_item_1line,
                     pendingAddressOptions
             );
-            adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-            picker.setAdapter(adapter);
-            int selectedIndex = pendingAddressOptions.indexOf(initial);
-            if (selectedIndex >= 0) {
-                picker.setSelection(selectedIndex);
-            }
-            LinearLayout.LayoutParams pickerParams = matchWrap();
-            pickerParams.setMargins(0, dp(6), 0, dp(12));
-            content.addView(picker, pickerParams);
-            picker.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            addressInput.setAdapter(adapter);
+            addressInput.setOnClickListener(new View.OnClickListener() {
                 @Override
-                public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
-                    if (position >= 0 && position < pendingAddressOptions.size()) {
-                        manualInput.setText(pendingAddressOptions.get(position));
-                        manualInput.setSelection(manualInput.getText().length());
-                    }
+                public void onClick(View view) {
+                    addressInput.showDropDown();
                 }
-
+            });
+            addressInput.setOnFocusChangeListener(new View.OnFocusChangeListener() {
                 @Override
-                public void onNothingSelected(AdapterView<?> parent) {
+                public void onFocusChange(View view, boolean hasFocus) {
+                    if (hasFocus) {
+                        addressInput.showDropDown();
+                    }
                 }
             });
         } else {
             TextView empty = text("没有获取到附近地址，可以手动填写。", 13, color("#6F756D"), Typeface.NORMAL);
-            empty.setPadding(0, 0, 0, dp(10));
+            empty.setPadding(0, dp(8), 0, 0);
             content.addView(empty);
         }
-
-        TextView manualLabel = text("打卡地名", 13, color("#6F756D"), Typeface.BOLD);
-        content.addView(manualLabel);
-        manualInput.setText(initial);
-        manualInput.setSelection(manualInput.getText().length());
+        addressInput.setText(initial);
+        addressInput.setSelection(addressInput.getText().length());
         LinearLayout.LayoutParams inputParams = matchWrap();
         inputParams.setMargins(0, dp(6), 0, 0);
-        content.addView(manualInput, inputParams);
+        content.addView(addressInput, inputParams);
 
         final AlertDialog dialog = new AlertDialog.Builder(this)
                 .setTitle("选择地名")
@@ -2532,7 +2629,7 @@ public final class MainActivity extends Activity {
                 dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(new View.OnClickListener() {
                     @Override
                     public void onClick(View view) {
-                        String address = inputValue(manualInput);
+                        String address = inputValue(addressInput);
                         if (address.isEmpty()) {
                             pendingCheckinAddress = "";
                             if (activeAddressText != null) {
@@ -2551,6 +2648,14 @@ public final class MainActivity extends Activity {
             }
         });
         dialog.show();
+        if (!pendingAddressOptions.isEmpty()) {
+            addressInput.post(new Runnable() {
+                @Override
+                public void run() {
+                    addressInput.showDropDown();
+                }
+            });
+        }
     }
 
     private String formatLatLng(AMapLocation location) {

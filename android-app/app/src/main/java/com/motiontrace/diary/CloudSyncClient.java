@@ -17,6 +17,7 @@ final class CloudSyncClient {
     private static final String TAG = "MotionTrace";
     private static final String PREFS = "cloud_sync";
     private static final String KEY_TOKEN = "token";
+    private static final String KEY_USERNAME = "username";
     private static final String KEY_EMAIL = "email";
 
     private final Context context;
@@ -33,6 +34,10 @@ final class CloudSyncClient {
         return prefs().getString(KEY_EMAIL, "");
     }
 
+    String getUsername() {
+        return prefs().getString(KEY_USERNAME, "");
+    }
+
     boolean isConfigured() {
         return !getBaseUrl().isEmpty();
     }
@@ -41,8 +46,9 @@ final class CloudSyncClient {
         return !getToken().isEmpty();
     }
 
-    String register(String email, String password) throws Exception {
+    String register(String username, String password, String email) throws Exception {
         JSONObject request = new JSONObject();
+        request.put("username", username);
         request.put("email", email);
         request.put("password", password);
         JSONObject response = post("/auth/register", request, "");
@@ -50,20 +56,20 @@ final class CloudSyncClient {
         if (token.isEmpty()) {
             throw new IllegalStateException("云端登录返回异常");
         }
-        saveSession(email, token);
+        saveSession(response, username, email, token);
         return token;
     }
 
-    String login(String email, String password) throws Exception {
+    String login(String username, String password) throws Exception {
         JSONObject request = new JSONObject();
-        request.put("email", email);
+        request.put("username", username);
         request.put("password", password);
         JSONObject response = post("/auth/login", request, "");
         String token = response.optString("token", "");
         if (token.isEmpty()) {
             throw new IllegalStateException("云端登录返回异常");
         }
-        saveSession(email, token);
+        saveSession(response, username, "", token);
         return token;
     }
 
@@ -88,12 +94,17 @@ final class CloudSyncClient {
     void logout() {
         prefs().edit()
                 .remove(KEY_TOKEN)
+                .remove(KEY_USERNAME)
                 .remove(KEY_EMAIL)
                 .apply();
     }
 
-    private void saveSession(String email, String token) {
+    private void saveSession(JSONObject response, String fallbackUsername, String fallbackEmail, String token) {
+        JSONObject user = response.optJSONObject("user");
+        String username = user == null ? fallbackUsername : user.optString("username", fallbackUsername);
+        String email = user == null ? fallbackEmail : user.optString("email", fallbackEmail);
         prefs().edit()
+                .putString(KEY_USERNAME, username == null ? "" : username)
                 .putString(KEY_EMAIL, email)
                 .putString(KEY_TOKEN, token)
                 .apply();
@@ -157,11 +168,20 @@ final class CloudSyncClient {
             error = text == null || text.isEmpty() ? "" : new JSONObject(text).optString("error", "");
         } catch (Exception ignored) {
         }
+        if ("username_exists".equals(error)) {
+            return "用户名已存在";
+        }
         if ("email_exists".equals(error)) {
             return "邮箱已注册";
         }
+        if ("invalid_username".equals(error)) {
+            return "用户名需为 3-32 位字母、数字、下划线、点或横线";
+        }
+        if ("invalid_email".equals(error)) {
+            return "邮箱格式不正确";
+        }
         if ("invalid_credentials".equals(error)) {
-            return code == 400 ? "邮箱格式或密码不符合要求" : "邮箱或密码不正确";
+            return code == 400 ? "用户名或密码不符合要求" : "用户名或密码不正确";
         }
         if ("invalid_password".equals(error)) {
             return "新密码至少 8 位，且不超过 128 位";
