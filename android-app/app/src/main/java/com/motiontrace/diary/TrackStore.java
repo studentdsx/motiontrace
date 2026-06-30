@@ -188,12 +188,14 @@ final class TrackStore {
         }
 
         long timestamp = System.currentTimeMillis();
+        String tripId = activeTripId(day.optJSONArray("trips"), timestamp);
         JSONArray current = day.optJSONArray("checkins");
         JSONArray next = new JSONArray();
 
         try {
             JSONObject checkin = new JSONObject();
             checkin.put("id", "checkin_" + timestamp);
+            checkin.put("tripId", tripId);
             checkin.put("latitude", latitude);
             checkin.put("longitude", longitude);
             checkin.put("timestamp", timestamp);
@@ -473,6 +475,28 @@ final class TrackStore {
         return null;
     }
 
+    private static String activeTripId(JSONArray trips, long timestamp) {
+        if (trips == null) {
+            return "";
+        }
+        JSONObject active = activeTrip(trips);
+        if (active != null) {
+            return active.optString("id", "");
+        }
+        for (int i = trips.length() - 1; i >= 0; i--) {
+            JSONObject trip = trips.optJSONObject(i);
+            if (trip == null) {
+                continue;
+            }
+            long start = trip.optLong("startTime", 0L);
+            long end = trip.optLong("endTime", 0L);
+            if (start > 0L && timestamp >= start && (end <= 0L || timestamp <= end)) {
+                return trip.optString("id", "");
+            }
+        }
+        return "";
+    }
+
     private static void saveDay(Context context, JSONObject root, String date, JSONObject day) throws JSONException {
         day.put("updatedAt", System.currentTimeMillis());
         root.put(date, day);
@@ -526,7 +550,17 @@ final class TrackStore {
         record.distanceMeters = day.optDouble("distanceMeters", 0.0);
         record.startTime = day.optLong("startTime", 0L);
         record.endTime = day.optLong("endTime", 0L);
-        record.tripCount = parseTripCount(day);
+
+        JSONArray trips = day.optJSONArray("trips");
+        if (trips != null) {
+            for (int i = 0; i < trips.length(); i++) {
+                TripRecord trip = parseTrip(trips.optJSONObject(i));
+                if (trip != null) {
+                    record.trips.add(trip);
+                }
+            }
+        }
+        record.tripCount = record.trips.isEmpty() ? parseTripCount(day) : record.trips.size();
 
         JSONArray points = day.optJSONArray("points");
         if (points != null) {
@@ -560,6 +594,17 @@ final class TrackStore {
         return points != null && points.length() > 0 ? 1 : 0;
     }
 
+    private static TripRecord parseTrip(JSONObject object) {
+        if (object == null) {
+            return null;
+        }
+        TripRecord trip = new TripRecord();
+        trip.id = object.optString("id", "");
+        trip.startTime = object.optLong("startTime", 0L);
+        trip.endTime = object.optLong("endTime", 0L);
+        return trip.startTime > 0L ? trip : null;
+    }
+
     private static PointRecord parsePoint(JSONObject object) {
         if (object == null) {
             return null;
@@ -579,6 +624,7 @@ final class TrackStore {
         }
         CheckinRecord checkin = new CheckinRecord();
         checkin.id = object.optString("id", "");
+        checkin.tripId = object.optString("tripId", "");
         checkin.latitude = object.optDouble("latitude", 0.0);
         checkin.longitude = object.optDouble("longitude", 0.0);
         checkin.timestamp = object.optLong("timestamp", 0L);
@@ -636,6 +682,13 @@ final class TrackStore {
         int tripCount;
         final List<PointRecord> points = new ArrayList<>();
         final List<CheckinRecord> checkins = new ArrayList<>();
+        final List<TripRecord> trips = new ArrayList<>();
+    }
+
+    static final class TripRecord {
+        String id;
+        long startTime;
+        long endTime;
     }
 
     static final class PointRecord {
@@ -648,6 +701,7 @@ final class TrackStore {
 
     static final class CheckinRecord {
         String id;
+        String tripId;
         double latitude;
         double longitude;
         long timestamp;

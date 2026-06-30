@@ -4,7 +4,7 @@
 
 ## 可行性边界
 
-- 适合存储用户账号、登录会话、轨迹 JSON 快照、行程、打卡地名和文字。
+- 适合存储用户账号、登录会话、轨迹 JSON 快照、结构化 GPS 点位、行程、打卡地名和文字。
 - 当前版本不上传打卡照片原图，照片仍保存在手机本地。
 - 如果后续需要同步照片，建议新增 Cloudflare R2，不建议把图片塞进 D1。
 
@@ -39,6 +39,7 @@ wrangler deploy
 
 部署后的 Worker URL 填到 Android App 构建配置 `CLOUD_WORKER_URL`，不要让终端用户手动填写。
 管理后台访问 `https://motiontrace.631581.xyz/admin`，未登录时会先进入登录页；默认账号为 `admin`，默认密码为 `Admin@1357`。
+登录后可以按用户、行程 ID、轨迹日期、时间范围筛选云端 GPS 点位，支持列表/地图视图切换，并可导出 CSV。
 `motiontrace.631581.xyz` 建议在 Cloudflare 控制台里作为 Worker 自定义域名绑定一次；自动部署只更新 Worker 脚本和 D1 表结构，避免 GitHub Actions Token 额外依赖 Zone 路由权限。
 
 ## GitHub Actions 自动化部署
@@ -110,8 +111,37 @@ https://motiontrace.631581.xyz/admin
 ```
 
 默认账号为 `admin`，默认密码为 `Admin@1357`。
-登录成功后进入管理页，可按邮箱过滤并查询提交记录。
-后台当前展示每次轨迹上传的提交时间、用户邮箱、上传体积、轨迹天数、轨迹点数、行程数和打卡数。
+登录成功后进入管理页，可查询云端结构化轨迹记录：
+
+- 按用户邮箱/用户 ID、行程 ID、日期、开始时间、结束时间筛选。
+- 列表视图展示时间、用户、日期、行程、点序号、经纬度、速度、精度和点位 ID。
+- 地图视图会按用户 + 日期 + 行程分组绘制历史轨迹。
+- 点击 `导出 CSV` 可下载当前筛选条件下的轨迹点，最多导出 10000 条。
+
+后台仍保留提交记录接口 `GET /admin/api/submissions`，用于排查每次上传的体积、天数、轨迹点数、行程数和打卡数。
+
+## 数据结构
+
+云同步上传时，App 仍提交完整轨迹 JSON 快照。Worker 会保留原始快照，同时解析出 GPS 点位写入 `track_points` 表，便于后台查询和导出。
+
+`track_points` 主要字段：
+
+```text
+id           点位 ID
+user_id      用户 ID
+date         轨迹日期，格式为 yyyy-MM-dd
+trip_id      行程 ID
+trip_index   当天第几个行程
+point_index  原始快照中的点位序号
+timestamp    点位时间戳，毫秒
+longitude    经度
+latitude     纬度
+accuracy     定位精度，米
+speed        速度，m/s
+created_at   云端写入时间
+```
+
+如果旧数据里没有明确行程列表，Worker 会按兼容逻辑生成 `legacy_1`；无法匹配到行程时间段的点位会归入 `unassigned`。
 
 ## 账号逻辑
 
