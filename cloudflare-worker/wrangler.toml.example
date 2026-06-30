@@ -2,10 +2,6 @@ name = "motiontrace-api"
 main = "src/worker.js"
 compatibility_date = "2026-06-22"
 
-[[routes]]
-pattern = "motiontrace.631581.xyz"
-custom_domain = true
-
 [[d1_databases]]
 binding = "DB"
 database_name = "motiontrace"

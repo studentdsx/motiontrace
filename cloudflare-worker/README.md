@@ -39,7 +39,7 @@ wrangler deploy
 
 部署后的 Worker URL 填到 Android App 构建配置 `CLOUD_WORKER_URL`，不要让终端用户手动填写。
 管理后台访问 `https://motiontrace.631581.xyz/admin`，未登录时会先进入登录页；默认账号为 `admin`，默认密码为 `Admin@1357`。
-`wrangler.toml.example` 已配置 `motiontrace.631581.xyz` 为 Worker 自定义域名；自动部署时会使用这个域名。
+`motiontrace.631581.xyz` 建议在 Cloudflare 控制台里作为 Worker 自定义域名绑定一次；自动部署只更新 Worker 脚本和 D1 表结构，避免 GitHub Actions Token 额外依赖 Zone 路由权限。
 
 ## GitHub Actions 自动化部署
 
@@ -75,7 +75,7 @@ Account / D1 / Edit
 Account / Account Settings / Read
 ```
 
-如果后续要绑定自定义域名或路由，再额外给对应 Zone 的 Workers Routes 权限。
+如果要让 GitHub Actions 同时创建或修改自定义域名/路由，再额外给对应 Zone 的 Workers Routes 权限；当前默认流程不需要这项权限。
 
 ### 自动化流程做了什么
 

@@ -43,6 +43,7 @@ wrangler deploy
 
 把部署后的 Worker URL 写入 Android App 构建配置 `CLOUD_WORKER_URL`，由开发者配置，不让终端用户手动填写。
 管理后台访问 `https://motiontrace.631581.xyz/admin`，未登录时会跳转登录页；输入默认账号 `admin` 和默认密码 `Admin@1357` 后可查询提交记录。
+`motiontrace.631581.xyz` 作为正式服务地址使用，建议在 Cloudflare 控制台里绑定到 Worker；GitHub Actions 默认只更新 Worker 脚本和 D1 表结构。
 
 ## Android 端
 
